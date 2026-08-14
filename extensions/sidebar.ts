@@ -28,8 +28,6 @@ import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works
 const MIN_WIDTH = 120;
 /** Sidebar panel width (same as opencode: 42). */
 const PANEL_WIDTH = 42;
-/** Max todo items rendered in the panel (rest summarized). */
-const MAX_TODOS = 8;
 
 interface Todo {
 	id: number;
@@ -117,6 +115,12 @@ export default function (pi: ExtensionAPI) {
 		private theme: Theme;
 		private cachedWidth = 0;
 		private cachedLines: string[] = [];
+		/** Scroll offset (in todo lines) of the todo window. */
+		private todoScrollTop = 0;
+		/** Total wrapped todo lines (updated each render). */
+		private todoLineCount = 0;
+		/** Rows available for the todo window (updated each render). */
+		private todoAreaHeight = 0;
 
 		constructor(theme: Theme) {
 			this.theme = theme;
@@ -190,15 +194,19 @@ export default function (pi: ExtensionAPI) {
 
 			lines.push(vline);
 
-			// --- Todos ---
+			// --- Todos (header fixed, items in a scrollable window) ---
 			push(th.fg("text", th.bold("Todos")));
 			push(divider);
+			const todoBlock: string[] = [];
 			if (todos.length === 0) {
 				push(th.fg("muted", "no todos"));
 			} else {
 				const done = todos.filter((t) => t.status === "completed").length;
 				push(th.fg("muted", `${done}/${todos.length} completed`));
-				for (const t of todos.slice(0, MAX_TODOS)) {
+				// All todos go into the block; the visible window is scrolled by the
+				// mouse wheel over the sidebar (scrollVertical), independently of the
+				// chat viewport.
+				for (const t of todos) {
 					// opencode TodoItem: in_progress -> warning, else muted
 					const color = t.status === "in_progress" ? "warning" : "muted";
 					const mark = t.status === "completed" ? "✓" : t.status === "in_progress" ? "•" : " ";
@@ -206,17 +214,15 @@ export default function (pi: ExtensionAPI) {
 					const wrapped = wrapTextWithAnsi(t.text, Math.max(4, contentW - 6));
 					wrapped.forEach((wl, idx) => {
 						if (idx === 0) {
-							push(th.fg(color, `[${mark}] `) + th.fg(color, wl));
+							todoBlock.push(th.fg(color, `[${mark}] `) + th.fg(color, wl));
 						} else {
 							// align continuation lines with the todo text (after "[x] ")
-							push(th.fg(color, "    ") + th.fg(color, wl));
+							todoBlock.push(th.fg(color, "    ") + th.fg(color, wl));
 						}
 					});
 				}
-				if (todos.length > MAX_TODOS) {
-					push(th.fg("muted", `... ${todos.length - MAX_TODOS} more`));
-				}
 			}
+			this.todoLineCount = todoBlock.length;
 
 			lines.push(vline);
 
@@ -227,14 +233,28 @@ export default function (pi: ExtensionAPI) {
 			const lead = Math.max(0, contentW - 2 - badgeW);
 
 			if (viewportH !== undefined && viewportH > 0) {
-				// Fill the rest of the right column so the panel spans the full
-				// terminal height; the badge stays pinned to the very bottom row.
-				while (lines.length < viewportH - 1) {
+				// Footer (fixed): blank line + badge pinned to the very bottom row.
+				const footerRows = 2;
+				const todoArea = Math.max(0, viewportH - lines.length - footerRows);
+				this.todoAreaHeight = todoArea;
+				// Clamp the scroll offset into range (handles todos shrinking).
+				const maxScroll = Math.max(0, this.todoLineCount - todoArea);
+				this.todoScrollTop = Math.max(0, Math.min(this.todoScrollTop, maxScroll));
+				// Render the visible todo window; the rest of the column is blank
+				// rows so the panel still spans the full terminal height.
+				for (const tl of todoBlock.slice(this.todoScrollTop, this.todoScrollTop + todoArea)) {
+					push(tl);
+				}
+				while (lines.length < viewportH - footerRows) {
 					lines.push(vline + pad);
 				}
+				lines.push(vline);
 				lines.push(vline + " " + " ".repeat(lead) + badge);
 			} else {
-				// bottom padding (fallback without a viewport height)
+				// bottom padding (fallback without a viewport height): show all todos
+				for (const tl of todoBlock) {
+					push(tl);
+				}
 				lines.push(vline + " " + " ".repeat(lead) + badge);
 				lines.push(vline);
 				lines.push(vline + pad);
@@ -243,6 +263,23 @@ export default function (pi: ExtensionAPI) {
 			this.cachedWidth = width;
 			this.cachedLines = lines;
 			return lines;
+		}
+
+		/**
+		 * Scroll the todo window. delta > 0 scrolls toward older todos (wheel up).
+		 * Returns true if the scroll position changed (cache invalidated). Called
+		 * by the TUI when the mouse wheel is over the sidebar column, so the todos
+		 * scroll independently of the chat viewport.
+		 */
+		scrollVertical(delta: number): boolean {
+			const maxScroll = Math.max(0, this.todoLineCount - this.todoAreaHeight);
+			// todoScrollTop counts from the TOP of the list (0 = oldest), so to
+			// scroll toward older todos on wheel-up (delta > 0) we subtract.
+			const next = Math.max(0, Math.min(maxScroll, this.todoScrollTop - delta * 3));
+			if (next === this.todoScrollTop) return false;
+			this.todoScrollTop = next;
+			this.invalidate();
+			return true;
 		}
 
 		invalidate(): void {

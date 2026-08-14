@@ -1,0 +1,44 @@
+diff --git a/packages/coding-agent/src/core/tools/bash.ts b/packages/coding-agent/src/core/tools/bash.ts
+index d1c8048..9f35a54 100644
+--- a/packages/coding-agent/src/core/tools/bash.ts
++++ b/packages/coding-agent/src/core/tools/bash.ts
+@@ -24,6 +24,12 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult
+ const MAX_TIMEOUT_MS = 2_147_483_647;
+ const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
+ 
++// 模型未传 timeout 时应用的默认超时（秒）。恢复 0.84.1 之前的行为：
++// 模型未传 timeout 时应用的默认超时（秒）。恢复 0.84.1 之前的行为：
++// AI 运行命令时命令卡片上始终展示 timeout，命令也不会无限期挂起。
++// 与 DeepSeek 系模型习惯的默认 timeout=120 保持一致；模型显式传值时覆盖。
++const DEFAULT_BASH_TIMEOUT_SECONDS = 120;
++
+ function resolveTimeoutMs(timeout: number | undefined): number | undefined {
+ 	if (timeout === undefined) return undefined;
+ 	if (!Number.isFinite(timeout) || timeout <= 0) {
+@@ -230,7 +236,7 @@ function formatDuration(ms: number): string {
+ 
+ function formatBashCall(args: { command?: string; timeout?: number } | undefined): string {
+ 	const command = str(args?.command);
+-	const timeout = args?.timeout as number | undefined;
++	const timeout = (args?.timeout as number | undefined) ?? DEFAULT_BASH_TIMEOUT_SECONDS;
+ 	const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
+ 	const commandDisplay = command === null ? invalidArgText(theme) : command ? command : theme.fg("toolOutput", "...");
+ 	return theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix;
+@@ -340,6 +346,8 @@ export function createBashToolDefinition(
+ 			onUpdate?,
+ 			ctx?,
+ 		) {
++			// 模型未指定 timeout 时回退到默认超时，保证实际执行与卡片展示一致
++			const effectiveTimeout = timeout ?? DEFAULT_BASH_TIMEOUT_SECONDS;
+ 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
+ 			const spawnContext = resolveSpawnContext(resolvedCommand, cwd, spawnHook, exposeSessionEnvironment, ctx);
+ 			const output = new OutputAccumulator({ tempFilePrefix: "pi-bash" });
+@@ -432,7 +440,7 @@ export function createBashToolDefinition(
+ 					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
+ 						onData: handleData,
+ 						signal,
+-						timeout,
++						timeout: effectiveTimeout,
+ 						env: spawnContext.env,
+ 					});
+ 					exitCode = result.exitCode;

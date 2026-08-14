@@ -1,0 +1,145 @@
+--- a/packages/tui/src/utils.ts
++++ b/packages/tui/src/utils.ts
+@@ -829,6 +829,40 @@
+  * @param width - Maximum visible width per line
+  * @returns Array of wrapped lines (NOT padded to width)
+  */
++
++/**
++ * Invisible APC markers appended at hard-wrap points by wrapTextWithAnsi.
++ * Terminals ignore them (zero display width). The TUI copy paths use them to
++ * tell a hard wrap (source text continued on the next row) apart from a real
++ * newline, so wrapped chat paragraphs copy back as one continuous line:
++ *  - WRAP_MARKER:       boundary with no whitespace in the source
++ *  - WRAP_SPACE_MARKER: boundary where the source had whitespace (insert one)
++ */
++export const WRAP_MARKER = "\x1b_Pwrap\x1b\\";
++export const WRAP_SPACE_MARKER = "\x1b_PwrapS\x1b\\";
++
++/**
++ * Classify the wrap marker a rendered line ends with:
++ *  - "space": the source text continues on the next row with whitespace
++ *  - "none":  the source text continues without whitespace
++ *  - undefined: no wrap marker (a real newline boundary)
++ * Trailing padding / background reset sequences after the marker are ignored.
++ */
++export function wrapBoundaryKind(line: string): "space" | "none" | undefined {
++	const check = (marker: string): boolean => {
++		const idx = line.indexOf(marker);
++		return idx !== -1 && stripTerminalSequences(line.slice(idx + marker.length)).trim() === "";
++	};
++	if (check(WRAP_SPACE_MARKER)) return "space";
++	if (check(WRAP_MARKER)) return "none";
++	return undefined;
++}
++
++/** True if `line` ends with visible whitespace (ignoring trailing ANSI codes). */
++function endsWithVisibleWhitespace(line: string): boolean {
++	return /[ \t\u3000]$/.test(stripTerminalSequences(line));
++}
++
+ export function wrapTextWithAnsi(text: string, width: number): string[] {
+ 	if (!text) {
+ 		return [""];
+@@ -878,12 +912,14 @@
+ 		// Token itself is too long - break it character by character
+ 		if (tokenVisibleLength > width && !isWhitespace) {
+ 			if (currentLine) {
++				// Classify the boundary BEFORE appending the underline reset.
++				const boundarySpace = endsWithVisibleWhitespace(currentLine);
+ 				// Add specific reset for underline only (preserves background)
+ 				const lineEndReset = tracker.getLineEndReset();
+ 				if (lineEndReset) {
+ 					currentLine += lineEndReset;
+ 				}
+-				wrapped.push(currentLine);
++				wrapped.push(currentLine.trimEnd() + (boundarySpace ? WRAP_SPACE_MARKER : WRAP_MARKER));
+ 				currentLine = "";
+ 				currentVisibleLength = 0;
+ 			}
+@@ -891,7 +927,7 @@
+ 			// Break long token - breakLongWord handles its own resets
+ 			const broken = breakLongWord(token, width, tracker);
+ 			for (let i = 0; i < broken.length - 1; i++) {
+-				wrapped.push(broken[i]!);
++				wrapped.push(broken[i]! + WRAP_MARKER);
+ 			}
+ 			currentLine = broken[broken.length - 1];
+ 			currentVisibleLength = visibleWidth(currentLine);
+@@ -908,7 +944,7 @@
+ 			if (lineEndReset) {
+ 				lineToWrap += lineEndReset;
+ 			}
+-			wrapped.push(lineToWrap);
++			wrapped.push(lineToWrap + (endsWithVisibleWhitespace(currentLine) || isWhitespace ? WRAP_SPACE_MARKER : WRAP_MARKER));
+ 			if (isWhitespace) {
+ 				// Don't start new line with whitespace
+ 				currentLine = tracker.getActiveCodes();
+--- a/packages/tui/src/tui-main-screen.ts
++++ b/packages/tui/src/tui-main-screen.ts
+@@ -3,7 +3,7 @@
+ import type { Terminal } from "./terminal.ts";
+ import { deleteKittyImage, isImageLine } from "./terminal-image.ts";
+ import { compositeTuiLine, type TUI, TuiBase, type TuiInputListenerResult, type TuiStopOptions, SEGMENT_RESET } from "./tui.ts";
+-import { extractAnsiCode, getGraphemeCellRange, getWordSegmenter, sliceByColumn, stripTerminalSequences, visibleWidth } from "./utils.ts";
++import { extractAnsiCode, getGraphemeCellRange, getWordSegmenter, sliceByColumn, stripTerminalSequences, visibleWidth, wrapBoundaryKind } from "./utils.ts";
+ 
+ const KITTY_SEQUENCE_PREFIX = "\x1b_G";
+ 
+@@ -948,13 +948,22 @@
+ 	private copyMainSelectionToClipboard(): void {
+ 		const selection = this.getMainSelectionBounds();
+ 		if (!selection) return;
+-		const lines: string[] = [];
++		let text = "";
+ 		for (let row = selection.start.row; row <= selection.end.row; row++) {
+ 			const line = this.selectionSourceLines[row] ?? "";
+ 			const columns = this.getMainSelectionColumns(line, row, selection);
+-			lines.push(stripTerminalSequences(sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true)).trimEnd());
++			text += stripTerminalSequences(sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true)).trimEnd();
++			// Hard-wrapped lines (marked by wrapTextWithAnsi) continue on the next
++			// row without a newline in the source; join them so wrapped paragraphs
++			// copy back as one continuous line instead of gaining newlines at wrap
++			// points (which the sidebar's narrower chat column makes more common).
++			// A space marker restores the whitespace the wrap dropped.
++			if (row < selection.end.row) {
++				const kind = wrapBoundaryKind(line);
++				if (kind === "space") text += " ";
++				else if (kind === undefined) text += "\n";
++			}
+ 		}
+-		const text = lines.join("\n");
+ 		if (text.length === 0) return;
+ 		this.terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+ 		this.flashMainMessage("Copied!");
+--- a/packages/tui/src/tui-alt-screen.ts
++++ b/packages/tui/src/tui-alt-screen.ts
+@@ -40,6 +40,7 @@
+ 	sliceByColumn,
+ 	stripTerminalSequences,
+ 	visibleWidth,
++	wrapBoundaryKind,
+ } from "./utils.ts";
+ 
+ const ENTER_ALT_SCREEN = "\x1b[?1049h";
+@@ -891,7 +892,19 @@
+ 				).trimEnd(),
+ 			);
+ 		}
+-		const text = lines.join("\n");
++		// Hard-wrapped lines (marked by wrapTextWithAnsi) continue on the next row
++		// without a newline in the source; join them so wrapped paragraphs copy
++		// back as one continuous line instead of gaining newlines at wrap points.
++		// A space marker restores the whitespace the wrap dropped.
++		let text = "";
++		for (let i = 0; i < lines.length; i++) {
++			text += lines[i]!;
++			if (i < lines.length - 1) {
++				const kind = wrapBoundaryKind(sourceLines[selection.start.row + i] ?? "");
++				if (kind === "space") text += " ";
++				else if (kind === undefined) text += "\n";
++			}
++		}
+ 		if (text.length === 0) return;
+ 		this.terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+ 		this.flash("Copied!");

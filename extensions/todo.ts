@@ -163,8 +163,15 @@ export default function (pi: ExtensionAPI) {
 
 			const details = msg.details as TodoDetails | undefined;
 			if (details) {
-				todos = details.todos;
-				nextId = details.nextId;
+				// 参数校验失败的 todo 结果 details 是空对象 {}（todos/nextId 均为 undefined），
+				// 必须跳过，否则会把内存状态污染成 undefined，导致 execute 里 todos.push 报错
+				// “Cannot read properties of undefined (reading 'push')”。
+				if (Array.isArray(details.todos)) {
+					todos = details.todos;
+				}
+				if (typeof details.nextId === "number") {
+					nextId = details.nextId;
+				}
 			}
 		}
 	};
@@ -422,6 +429,15 @@ export default function (pi: ExtensionAPI) {
 
 				case "clear":
 					return new Text(theme.fg("success", "✓ ") + theme.fg("muted", "Cleared all todos"), 0, 0);
+
+				default: {
+					// 参数校验失败（details 为空对象 {}，如非法 action）或未知 action 时，
+					// 回退渲染 content 文本，避免返回 undefined 导致 pi TUI 崩溃
+					// （ToolExecutionComponent.updateDisplay 会把 undefined 加进 Box.children，
+					// 随后 Box.render 读取 undefined.render 抛出 TypeError）。
+					const text = result.content?.[0];
+					return new Text(text?.type === "text" ? text.text : "", 0, 0);
+				}
 			}
 		},
 	});

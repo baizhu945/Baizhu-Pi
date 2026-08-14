@@ -1,0 +1,453 @@
+--- a/packages/tui/src/tui.ts
++++ b/packages/tui/src/tui.ts
+@@ -760,9 +760,12 @@
+ 		);
+ 		this.afterTerminalStart();
+ 		this.terminal.hideCursor();
+-		// Enable button-event mouse tracking so the scroll wheel reaches us.
++		// Enable mouse tracking so the scroll wheel and (main screen) drag
++		// selection reach us: button events, button-motion, focus events and SGR
++		// encoding. Shift+drag is still reserved by the terminal emulator for
++		// native text selection.
+ 		this.mouseTrackingEnabled = true;
+-		this.terminal.write("\x1b[?1000h");
++		this.terminal.write("\x1b[?1000h\x1b[?1002h\x1b[?1004h\x1b[?1006h");
+ 		if (this.terminalColorSchemeNotificationsEnabled) {
+ 			this.terminal.write("\x1b[?2031h");
+ 		}
+@@ -812,7 +815,7 @@
+ 		this.stopped = true;
+ 		if (this.mouseTrackingEnabled) {
+ 			this.mouseTrackingEnabled = false;
+-			this.terminal.write("\x1b[?1000l");
++			this.terminal.write("\x1b[?1006l\x1b[?1004l\x1b[?1002l\x1b[?1000l");
+ 		}
+ 		this.cancelRenderTimer();
+ 		if (this.terminalColorSchemeNotificationsEnabled) {
+--- a/packages/tui/src/tui-main-screen.ts
++++ b/packages/tui/src/tui-main-screen.ts
+@@ -1,8 +1,9 @@
+ import * as fs from "node:fs";
+ import * as path from "node:path";
++import type { Terminal } from "./terminal.ts";
+ import { deleteKittyImage, isImageLine } from "./terminal-image.ts";
+-import { compositeTuiLine, type TUI, TuiBase, type TuiStopOptions, SEGMENT_RESET } from "./tui.ts";
+-import { visibleWidth } from "./utils.ts";
++import { compositeTuiLine, type TUI, TuiBase, type TuiInputListenerResult, type TuiStopOptions, SEGMENT_RESET } from "./tui.ts";
++import { extractAnsiCode, getGraphemeCellRange, getWordSegmenter, sliceByColumn, stripTerminalSequences, visibleWidth } from "./utils.ts";
+ 
+ const KITTY_SEQUENCE_PREFIX = "\x1b_G";
+ 
+@@ -43,6 +44,22 @@
+ 	return Boolean(process.env.TERMUX_VERSION);
+ }
+ 
++const FOCUS_IN = "\x1b[I";
++const FOCUS_OUT = "\x1b[O";
++const DOUBLE_CLICK_INTERVAL_MS = 500;
++const wordSegmenter = getWordSegmenter();
++
++interface SelectionPoint {
++	row: number;
++	col: number;
++	boundary?: boolean;
++}
++
++interface SelectionRange {
++	start: SelectionPoint;
++	end: SelectionPoint;
++}
++
+ export interface TuiMainScreenRenderState {
+ 	previousLines: string[];
+ 	previousWidth: number;
+@@ -55,6 +72,15 @@
+ 
+ /** TUI implementation that renders into the terminal's main screen and scrollback. */
+ export class TuiMainScreen extends TuiBase implements TUI {
++	constructor(terminal: Terminal, showHardwareCursor?: boolean, logDirectory?: string) {
++		super(terminal, showHardwareCursor, logDirectory);
++		// App-level mouse text selection (viewport mode): plain drag selects chat
++		// text and auto-copies it on release, so the composited layout sidebar is
++		// never included (native Shift+drag is handled by the terminal emulator
++		// and cannot be restricted by the application).
++		this.addInputListener((data) => this.handleMainScreenMouseInput(data));
++	}
++
+ 	readonly mode = "regular" as const;
+ 	private previousLines: string[] = [];
+ 	private previousKittyImageIds = new Set<number>();
+@@ -64,6 +90,22 @@
+ 	private hardwareCursorRow = 0;
+ 	private maxLinesRendered = 0;
+ 	private previousViewportTop = 0;
++	private selectionAnchor: SelectionPoint | undefined;
++	private selectionFocus: SelectionPoint | undefined;
++	private selectionGranularity: "character" | "word" | "line" = "character";
++	private selectionInitialRange: SelectionRange | undefined;
++	private lastClick: { timestamp: number; count: number; row: number; wordStart: number; wordEnd: number } | undefined;
++	private selectionPressActive = false;
++	private selectionDragged = false;
++	private selectionDragPointer: { x: number; y: number } | undefined;
++	private selectionAutoScrollDirection = 0;
++	private selectionAutoScrollTimer: NodeJS.Timeout | undefined;
++	/** Full (un-sliced, un-composited) render of the chat column, used as the copy source. */
++	private selectionSourceLines: string[] = [];
++	/** First row (buffer space) of the visible window, for screen<->buffer mapping. */
++	private windowStartRow = 0;
++	private flashText = "";
++	private flashUntil = 0;
+ 
+ 	captureRenderState(): TuiMainScreenRenderState {
+ 		return {
+@@ -224,6 +266,14 @@
+ 			this.scrollTop = 0;
+ 		}
+ 
++		// Track the visible window (buffer space) for app-level mouse selection.
++		// selectionSourceLines is the full un-composited chat render (the copy
++		// source); windowStartRow maps screen rows back to buffer rows.
++		this.selectionSourceLines = this.enableScroll ? (this.fullRenderCache?.lines ?? newLines) : newLines;
++		this.windowStartRow = this.enableScroll && this.selectionSourceLines.length > height
++			? this.selectionSourceLines.length - height - this.scrollTop
++			: 0;
++
+ 		// Pad window rows to full width and composite the layout sidebar on the
+ 		// right side. Both use getSidebarLayout geometry (same source as render),
+ 		// so the sidebar never covers conversation text. Only O(terminal height)
+@@ -261,6 +311,21 @@
+ 
+ 		newLines = this.applyLineResets(newLines);
+ 
++		// App-level text selection (viewport mode): highlight the selected chat
++		// columns. Selection is clipped to the chat column (getMainSelectionPoint
++		// clamps to mainW), so the composited sidebar is never highlighted.
++		if (this.enableScroll && this.selectionAnchor && this.selectionFocus) {
++			newLines = this.applyMainSelection(newLines, width, height);
++		}
++
++		// Transient flash message (e.g. "Copied!") overlaid on the bottom row.
++		if (this.flashText && Date.now() < this.flashUntil) {
++			const flashRow = Math.min(newLines.length - 1, height - 1);
++			if (flashRow >= 0) {
++				newLines[flashRow] = reset + "\x1b[2m" + this.flashText + SEGMENT_RESET + " ".repeat(Math.max(0, width - visibleWidth(this.flashText)));
++			}
++		}
++
+ 		// Helper to clear scrollback and viewport and render all new lines
+ 		const fullRender = (clear: boolean): void => {
+ 			this.fullRedrawCount += 1;
+@@ -638,4 +703,313 @@
+ 			this.terminal.hideCursor();
+ 		}
+ 	}
++
++	// ---- app-level mouse text selection (viewport mode) ----
++	// Mirrors TuiAltScreen's selection machinery, but maps screen coordinates
++	// through the app-controlled viewport (windowStartRow + screen y) instead of
++	// layout scrollview boxes, and clips columns to the chat column (mainW) so
++	// the composited layout sidebar is never selected.
++
++	private handleMainScreenMouseInput(data: string): TuiInputListenerResult {
++		if (data === FOCUS_IN || data === FOCUS_OUT) {
++			if (data === FOCUS_OUT) this.clearMainSelection();
++			return { consume: true };
++		}
++		if (!this.enableScroll) return undefined;
++		if (this.hasOverlayEntries) return undefined; // overlays: don't intercept clicks
++		const event = this.parseSgrMouseEvent(data);
++		if (!event) return undefined; // wheel or other sequence: let TuiBase handle it
++		if (event.button === 64 || event.button === 65) return undefined; // wheel: TuiBase scrolls
++		if ((event.button & 3) !== 0) return undefined; // middle/right button: not selection
++		this.handleMainSelectionMouseEvent(event);
++		return { consume: true };
++	}
++
++	private parseSgrMouseEvent(data: string): { button: number; x: number; y: number; release: boolean } | undefined {
++		const match = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data);
++		if (!match) return undefined;
++		return {
++			button: Number.parseInt(match[1], 10),
++			x: Number.parseInt(match[2], 10) - 1,
++			y: Number.parseInt(match[3], 10) - 1,
++			release: match[4] === "m",
++		};
++	}
++
++	private clearMainSelection(): void {
++		this.stopSelectionAutoScroll();
++		this.selectionPressActive = false;
++		this.selectionAnchor = undefined;
++		this.selectionFocus = undefined;
++		this.selectionGranularity = "character";
++		this.selectionInitialRange = undefined;
++		this.lastClick = undefined;
++		this.selectionDragged = false;
++		this.requestRender();
++	}
++
++	private getMainSelectionPoint(event: { x: number; y: number }): SelectionPoint {
++		const width = Math.max(1, this.terminal.columns);
++		const height = Math.max(1, this.terminal.rows);
++		const { mainW } = this.getSidebarLayout(width);
++		const col = Math.max(0, Math.min(mainW - 1, Math.max(0, Math.min(width - 1, event.x))));
++		const maxRow = Math.max(0, this.selectionSourceLines.length - 1);
++		const row = Math.max(0, Math.min(maxRow, this.windowStartRow + Math.max(0, Math.min(height - 1, event.y))));
++		return { row, col };
++	}
++
++	private getMainSelectionSourceLine(point: SelectionPoint): string {
++		return this.selectionSourceLines[point.row] ?? "";
++	}
++
++	private getMainWordSelection(point: SelectionPoint): SelectionRange | undefined {
++		const line = stripTerminalSequences(this.getMainSelectionSourceLine(point));
++		let start = 0;
++		for (const segment of wordSegmenter.segment(line)) {
++			const end = start + visibleWidth(segment.segment);
++			if (point.col >= start && point.col < end) {
++				return { start: { ...point, col: start }, end: { ...point, col: end, boundary: true } };
++			}
++			start = end;
++		}
++		return undefined;
++	}
++
++	private getMainLineSelection(point: SelectionPoint): SelectionRange {
++		return {
++			start: { ...point, col: 0 },
++			end: { ...point, col: visibleWidth(this.getMainSelectionSourceLine(point)), boundary: true },
++		};
++	}
++
++	private getMainClickCount(point: SelectionPoint, word: SelectionRange | undefined): number {
++		const now = Date.now();
++		const previous = this.lastClick;
++		const count =
++			word &&
++			previous &&
++			now - previous.timestamp <= DOUBLE_CLICK_INTERVAL_MS &&
++			previous.row === point.row &&
++			previous.wordStart === word.start.col &&
++			previous.wordEnd === word.end.col
++				? (previous.count % 3) + 1
++				: 1;
++		this.lastClick = word
++			? { timestamp: now, count, row: point.row, wordStart: word.start.col, wordEnd: word.end.col }
++			: undefined;
++		return count;
++	}
++
++	private updateMainSelectionFocus(point: SelectionPoint): void {
++		if (this.selectionGranularity === "character" || !this.selectionInitialRange) {
++			this.selectionFocus = point;
++			return;
++		}
++		const range = this.selectionGranularity === "word" ? this.getMainWordSelection(point) : this.getMainLineSelection(point);
++		if (!range) return;
++		const initial = this.selectionInitialRange;
++		const targetBeforeInitial =
++			range.start.row < initial.start.row || (range.start.row === initial.start.row && range.start.col < initial.start.col);
++		if (targetBeforeInitial) {
++			this.selectionAnchor = initial.end;
++			this.selectionFocus = range.start;
++		} else {
++			this.selectionAnchor = initial.start;
++			this.selectionFocus = range.end;
++		}
++	}
++
++	private handleMainSelectionMouseEvent(event: { button: number; x: number; y: number; release: boolean }): void {
++		const point = this.getMainSelectionPoint(event);
++		if (event.release) {
++			if (!this.selectionPressActive) return;
++			this.selectionPressActive = false;
++			this.stopSelectionAutoScroll();
++			if (!this.selectionAnchor) return;
++			this.updateMainSelectionFocus(point);
++			this.copyMainSelectionToClipboard();
++			this.requestRender();
++			return;
++		}
++		if ((event.button & 32) !== 0) {
++			// Drag: update the selection focus and autoscroll at window edges.
++			if (!this.selectionPressActive || !this.selectionAnchor) return;
++			this.selectionDragged = true;
++			this.lastClick = undefined;
++			this.updateMainSelectionFocus(point);
++			this.updateMainSelectionAutoScroll(event);
++			this.requestRender();
++			return;
++		}
++		// Press: start a new selection (character / word / line granularity).
++		this.stopSelectionAutoScroll();
++		this.selectionPressActive = true;
++		const { mainW } = this.getSidebarLayout(Math.max(1, this.terminal.columns));
++		if (event.x >= mainW) {
++			// Press on the sidebar column: clear the current selection but never
++			// start a new one (the sidebar is not selectable).
++			this.selectionAnchor = undefined;
++			this.selectionFocus = undefined;
++			this.selectionGranularity = "character";
++			this.selectionInitialRange = undefined;
++			this.lastClick = undefined;
++			this.selectionDragged = false;
++			return;
++		}
++		const anchor = this.getMainSelectionPoint(event);
++		const word = this.getMainWordSelection(anchor);
++		const clickCount = this.getMainClickCount(anchor, word);
++		const range = clickCount === 2 ? word : clickCount === 3 ? this.getMainLineSelection(anchor) : undefined;
++		this.selectionGranularity = range ? (clickCount === 2 ? "word" : "line") : "character";
++		this.selectionInitialRange = range;
++		this.selectionAnchor = range?.start ?? anchor;
++		this.selectionFocus = range?.end ?? anchor;
++		this.selectionDragged = false;
++		this.requestRender();
++	}
++
++	private updateMainSelectionAutoScroll(event: { x: number; y: number }): void {
++		if (!this.enableScroll || this.maxScrollTop <= 0) {
++			this.stopSelectionAutoScroll();
++			return;
++		}
++		this.selectionDragPointer = { x: event.x, y: event.y };
++		this.selectionAutoScrollDirection = event.y <= 0 ? -1 : event.y >= this.terminal.rows - 1 ? 1 : 0;
++		if (this.selectionAutoScrollDirection === 0) {
++			this.stopSelectionAutoScroll();
++			return;
++		}
++		if (this.selectionAutoScrollTimer) return;
++		this.selectionAutoScrollTimer = setInterval(() => this.autoScrollMainSelection(), 50);
++		this.selectionAutoScrollTimer.unref();
++	}
++
++	private stopSelectionAutoScroll(): void {
++		if (this.selectionAutoScrollTimer) {
++			clearInterval(this.selectionAutoScrollTimer);
++			this.selectionAutoScrollTimer = undefined;
++		}
++		this.selectionAutoScrollDirection = 0;
++		this.selectionDragPointer = undefined;
++	}
++
++	private autoScrollMainSelection(): void {
++		const pointer = this.selectionDragPointer;
++		const direction = this.selectionAutoScrollDirection;
++		if (!pointer || direction === 0) {
++			this.stopSelectionAutoScroll();
++			return;
++		}
++		const target = Math.max(0, Math.min(this.maxScrollTop, this.scrollTop + direction * 3));
++		if (target === this.scrollTop) {
++			this.stopSelectionAutoScroll();
++			return;
++		}
++		this.scrollTop = target;
++		const point = this.getMainSelectionPoint(pointer);
++		if (point) this.updateMainSelectionFocus(point);
++		this.requestRender();
++	}
++
++	private getMainSelectionBounds(): SelectionRange | undefined {
++		if (!this.selectionAnchor || !this.selectionFocus) return undefined;
++		const anchorBeforeFocus =
++			this.selectionAnchor.row < this.selectionFocus.row ||
++			(this.selectionAnchor.row === this.selectionFocus.row && this.selectionAnchor.col < this.selectionFocus.col);
++		if (this.selectionAnchor.row === this.selectionFocus.row && this.selectionAnchor.col === this.selectionFocus.col) {
++			return undefined;
++		}
++		return anchorBeforeFocus
++			? { start: this.selectionAnchor, end: this.selectionFocus }
++			: { start: this.selectionFocus, end: this.selectionAnchor };
++	}
++
++	private getMainSelectionColumns(
++		line: string,
++		row: number,
++		selection: SelectionRange,
++		minColumn = 0,
++		maxColumn = visibleWidth(line),
++	): { start: number; end: number } {
++		const lineWidth = visibleWidth(line);
++		let start = Math.max(0, minColumn);
++		let end = Math.min(lineWidth, maxColumn);
++		if (row === selection.start.row) {
++			start = getGraphemeCellRange(line, selection.start.col)?.start ?? Math.min(selection.start.col, lineWidth);
++		}
++		if (row === selection.end.row) {
++			end = selection.end.boundary
++				? Math.min(selection.end.col, lineWidth)
++				: (getGraphemeCellRange(line, selection.end.col)?.end ?? Math.min(selection.end.col + 1, lineWidth));
++		}
++		return { start: Math.max(minColumn, start), end: Math.min(maxColumn, end) };
++	}
++
++	private copyMainSelectionToClipboard(): void {
++		const selection = this.getMainSelectionBounds();
++		if (!selection) return;
++		const lines: string[] = [];
++		for (let row = selection.start.row; row <= selection.end.row; row++) {
++			const line = this.selectionSourceLines[row] ?? "";
++			const columns = this.getMainSelectionColumns(line, row, selection);
++			lines.push(stripTerminalSequences(sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true)).trimEnd());
++		}
++		const text = lines.join("\n");
++		if (text.length === 0) return;
++		this.terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
++		this.flashMainMessage("Copied!");
++	}
++
++	private flashMainMessage(text: string, durationMs = 1200): void {
++		this.flashText = text;
++		this.flashUntil = Date.now() + durationMs;
++		this.requestRender();
++		setTimeout(() => {
++			if (Date.now() >= this.flashUntil) {
++				this.flashText = "";
++				this.requestRender();
++			}
++		}, durationMs);
++	}
++
++	private applyMainSelectionHighlight(text: string): string {
++		let result = "\x1b[7m";
++		let index = 0;
++		while (index < text.length) {
++			const ansi = extractAnsiCode(text, index);
++			if (!ansi) {
++				result += text[index];
++				index += 1;
++				continue;
++			}
++			result += ansi.code;
++			if (ansi.code.endsWith("m")) result += "\x1b[7m";
++			index += ansi.length;
++		}
++		return `${result}\x1b[27m`;
++	}
++
++	private applyMainSelection(screen: string[], width: number, height: number): string[] {
++		const selection = this.getMainSelectionBounds();
++		if (!selection) return screen;
++		const { mainW } = this.getSidebarLayout(width);
++		const result = [...screen];
++		for (let row = selection.start.row; row <= selection.end.row; row++) {
++			const screenRow = row - this.windowStartRow;
++			if (screenRow < 0 || screenRow >= result.length) continue;
++			const line = result[screenRow];
++			if (isImageLine(line)) continue;
++			const pureLine = this.selectionSourceLines[row] ?? "";
++			const lineWidth = visibleWidth(pureLine);
++			const columns = this.getMainSelectionColumns(pureLine, row, selection, 0, Math.min(lineWidth, mainW));
++			if (columns.end <= columns.start) continue;
++			// Columns are identical on the composited screen line because the chat
++			// column occupies columns [0, mainW) in both representations.
++			const before = sliceByColumn(line, 0, columns.start, true);
++			const selected = sliceByColumn(line, columns.start, columns.end - columns.start, true);
++			const after = sliceByColumn(line, columns.end, Math.max(0, visibleWidth(line) - columns.end), true);
++			result[screenRow] = `${before}${this.applyMainSelectionHighlight(selected)}${after}`;
++		}
++		return result;
++	}
+ }
