@@ -467,7 +467,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Subagent",
 		description: [
 			"Delegate tasks to specialized subagents with isolated context. Each subagent runs in a separate pi process; only its final answer returns to you.",
-			"Built-in agents: general (general-purpose subagent for complex research and multi-step tasks, full tool capability, good for parallel work units); explore (read-only codebase exploration subagent — find files by pattern, search code, answer codebase questions; specify thoroughness: quick | medium | very thorough in the task); vision (multimodal vision agent on MiniMax M3 — use it to identify/transcribe image contents when your model does not support images, pass the image file path in the task).",
+			"Available agents: general (general-purpose subagent for complex research and multi-step tasks, full tool capability, good for parallel work units); explore (read-only codebase exploration subagent — find files by pattern, search code, answer codebase questions; specify thoroughness: quick | medium | very thorough in the task).",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
 			"When a task can be split into independent units, or a question needs deep codebase research, prefer delegating to subagents to keep your own context small.",
 			`Custom agents can be added as markdown files in ${path.join(getAgentDir(), "agents")}.`,

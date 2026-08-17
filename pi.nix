@@ -9,7 +9,13 @@
   nixpkgs.overlays = [
     (final: prev: {
       pi-coding-agent = prev.pi-coding-agent.overrideAttrs (old: {
-        patches = (old.patches or [ ]) ++ [ ./patches/cost-cny.patch ./patches/sidebar-layout.patch ./patches/bash-timeout.patch ./patches/main-screen-selection.patch ./patches/unwrap-copy.patch ./patches/sidebar-scroll.patch ];
+        patches = (old.patches or [ ]) ++ [ 
+          ./patches/cost-cny.patch 
+          ./patches/sidebar-layout.patch 
+          ./patches/bash-timeout.patch 
+          ./patches/main-screen-selection.patch 
+          ./patches/unwrap-copy.patch 
+          ./patches/sidebar-scroll.patch ];
       });
     })
   ];
@@ -35,8 +41,9 @@
 
       # 默认模型：DeepSeek V4 Flash
       # （defaultProvider 必须与 defaultModel 一起设置，模型解析器两者都需要）
-      defaultProvider = "deepseek";
-      defaultModel = "deepseek-v4-flash";
+      defaultProvider = "openai";
+      defaultModel = "gpt-5.6-luna";
+      defaultThinkingLevel = "xhigh";
 
       # 思维链默认展开（false = 不隐藏 thinking 块）；ctrl+t / alt+t 可随时折叠/展开
       hideThinkingBlock = false;
@@ -49,7 +56,7 @@
         "npm:pi-web-access@0.18.0"
         "npm:@narumitw/pi-goal"
 
-        "git:github.com/obra/superpowers"
+        # "git:github.com/obra/superpowers"
       ];
     };
   };
@@ -83,5 +90,7 @@
 
     # ---- 快捷键：思维链折叠/展开（alt+t 为未占用的新键，ctrl+t 为内置默认）----
     ".pi/agent/keybindings.json".source = ./keybindings.json;
+
+    ".pi/agent/models.json".source = ./models.json;
   };
 }
