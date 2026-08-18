@@ -25,6 +25,14 @@
     ../cc-connect.nix
   ];
 
+  # subagent 硬上限：防止模型、网络或遗留子进程让主任务无限等待。
+  # 扩展内置上限为 2 小时，这里显式固定为 30 分钟；终止时先 SIGTERM，
+  # 等待 3 秒后 SIGKILL 并回收整个进程组。
+  home.sessionVariables = {
+    PI_SUBAGENT_TIMEOUT_MS = "1800000";
+    PI_SUBAGENT_KILL_GRACE_MS = "3000";
+  };
+
   programs.pi-coding-agent = {
     enable = true;
 

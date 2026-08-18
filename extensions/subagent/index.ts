@@ -35,6 +35,36 @@ const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
+const DEFAULT_SUBAGENT_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_KILL_GRACE_MS = 3 * 1000;
+
+function readBoundedPositiveInteger(name: string, fallback: number, maximum: number): number {
+	const value = Number(process.env[name]);
+	if (!Number.isFinite(value) || value <= 0) return fallback;
+	return Math.min(Math.floor(value), maximum);
+}
+
+// A child must always have a finite lifetime, even when the model never returns
+// or a tool implementation ignores its own timeout.
+const SUBAGENT_TIMEOUT_MS = readBoundedPositiveInteger("PI_SUBAGENT_TIMEOUT_MS", DEFAULT_SUBAGENT_TIMEOUT_MS, 2 * 60 * 60 * 1000);
+const KILL_GRACE_MS = readBoundedPositiveInteger("PI_SUBAGENT_KILL_GRACE_MS", DEFAULT_KILL_GRACE_MS, 30 * 1000);
+
+function signalProcessTree(proc: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
+	if (!proc.pid) return;
+	try {
+		// detached=true makes the child a process-group leader on Unix. Killing
+		// the negative PGID also terminates bash commands and their descendants,
+		// which otherwise may keep stdout/stderr open forever.
+		if (process.platform !== "win32") process.kill(-proc.pid, signal);
+		else proc.kill(signal);
+	} catch {
+		try {
+			proc.kill(signal);
+		} catch {
+			/* The process may have exited between the two calls. */
+		}
+	}
+}
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -181,7 +211,7 @@ function getFinalOutput(messages: Message[]): string {
 }
 
 function isFailedResult(result: SingleResult): boolean {
-	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted" || Boolean(result.errorMessage);
 }
 
 function getResultOutput(result: SingleResult): string {
@@ -329,16 +359,69 @@ async function runSingleAgent(
 		}
 
 		args.push(`Task: ${task}`);
-		let wasAborted = false;
+		let terminationReason: "aborted" | "timeout" | undefined;
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
-			const proc = spawn(invocation.command, invocation.args, {
-				cwd: cwd ?? defaultCwd,
-				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
-			});
+			let proc: ReturnType<typeof spawn>;
+			try {
+				proc = spawn(invocation.command, invocation.args, {
+					cwd: cwd ?? defaultCwd,
+					shell: false,
+					detached: process.platform !== "win32",
+					// A subagent must not recursively create more subagents.
+					env: { ...process.env, PI_SUBAGENT_CHILD: "1" },
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+			} catch (error) {
+				currentResult.errorMessage = error instanceof Error ? error.message : String(error);
+				resolve(1);
+				return;
+			}
 			let buffer = "";
+			let settled = false;
+			let terminating = false;
+			let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+			let killTimer: ReturnType<typeof setTimeout> | undefined;
+			let forceFinishTimer: ReturnType<typeof setTimeout> | undefined;
+			let abortProc: () => void = () => undefined;
+
+			const cleanupTimers = () => {
+				if (timeoutTimer) clearTimeout(timeoutTimer);
+				if (killTimer) clearTimeout(killTimer);
+				if (forceFinishTimer) clearTimeout(forceFinishTimer);
+			};
+
+			const finish = (code: number, destroyStreams = false) => {
+				if (settled) return;
+				settled = true;
+				cleanupTimers();
+				if (signal) signal.removeEventListener("abort", abortProc);
+				if (destroyStreams) {
+					proc.stdout?.removeAllListeners();
+					proc.stderr?.removeAllListeners();
+					proc.stdout?.destroy();
+					proc.stderr?.destroy();
+				}
+				resolve(code);
+			};
+
+			const terminate = (reason: "aborted" | "timeout") => {
+				if (terminating || settled) return;
+				terminating = true;
+				terminationReason = reason;
+				currentResult.stopReason = reason === "aborted" ? "aborted" : "error";
+				currentResult.errorMessage =
+					reason === "aborted"
+						? "Subagent was aborted"
+						: "Subagent timed out after " + Math.ceil(SUBAGENT_TIMEOUT_MS / 1000) + " seconds";
+				signalProcessTree(proc, "SIGTERM");
+				killTimer = setTimeout(() => {
+					signalProcessTree(proc, "SIGKILL");
+					// Do not wait forever for a descendant that retained a pipe.
+					forceFinishTimer = setTimeout(() => finish(124, true), KILL_GRACE_MS);
+				}, KILL_GRACE_MS);
+			};
 
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
@@ -349,6 +432,7 @@ async function runSingleAgent(
 					return;
 				}
 
+				try {
 				if (event.type === "message_end" && event.message) {
 					const msg = event.message as Message;
 					currentResult.messages.push(msg);
@@ -375,6 +459,11 @@ async function runSingleAgent(
 					currentResult.messages.push(event.message as Message);
 					emitUpdate();
 				}
+				} catch (error) {
+					// A malformed event or a UI update failure must become a normal
+					// failed result, not an uncaught callback exception.
+					currentResult.errorMessage = error instanceof Error ? error.message : String(error);
+				}
 			};
 
 			proc.stdout.on("data", (data) => {
@@ -390,28 +479,28 @@ async function runSingleAgent(
 
 			proc.on("close", (code) => {
 				if (buffer.trim()) processLine(buffer);
-				resolve(code ?? 0);
+				finish(code ?? (terminationReason ? 124 : 1));
 			});
 
-			proc.on("error", () => {
-				resolve(1);
+			proc.on("error", (error) => {
+				currentResult.errorMessage = error.message;
+				finish(1, true);
 			});
 
-			if (signal) {
-				const killProc = () => {
-					wasAborted = true;
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
-				};
-				if (signal.aborted) killProc();
-				else signal.addEventListener("abort", killProc, { once: true });
-			}
+			abortProc = () => terminate("aborted");
+			if (signal?.aborted) abortProc();
+			else signal?.addEventListener("abort", abortProc, { once: true });
+			timeoutTimer = setTimeout(() => terminate("timeout"), SUBAGENT_TIMEOUT_MS);
 		});
 
 		currentResult.exitCode = exitCode;
-		if (wasAborted) throw new Error("Subagent was aborted");
+		if (terminationReason === "aborted") currentResult.exitCode = 130;
+		if (terminationReason === "timeout") currentResult.exitCode = 124;
+		return currentResult;
+	} catch (error) {
+		currentResult.exitCode = 1;
+		currentResult.stopReason = "error";
+		currentResult.errorMessage = error instanceof Error ? error.message : String(error);
 		return currentResult;
 	} finally {
 		if (tmpPromptPath)
@@ -461,6 +550,7 @@ const SubagentParams = Type.Object({
 export default function (pi: ExtensionAPI) {
 	// 注册 subagent 会话查看器：alt+s 进入 / 循环 / 退出（见 viewer.ts）
 	registerSubagentViewer(pi);
+	if (process.env.PI_SUBAGENT_CHILD === "1") return;
 
 	pi.registerTool({
 		name: "subagent",
