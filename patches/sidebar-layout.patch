@@ -246,15 +246,16 @@ diff --git a/packages/tui/src/tui-alt-screen.ts b/packages/tui/src/tui-alt-scree
 index aa062e4..32c8538 100644
 --- a/packages/tui/src/tui-alt-screen.ts
 +++ b/packages/tui/src/tui-alt-screen.ts
-@@ -26,6 +26,7 @@ import {
+@@ -29,6 +29,7 @@ import {
  	type Component,
  	CURSOR_MARKER,
  	compositeTuiLine,
 +	SEGMENT_RESET,
+ 	type OverlayHandle,
  	TuiBase,
  	type TuiStopOptions,
  	VIEWPORT_TUI,
-@@ -827,11 +828,34 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
+@@ -1246,15 +1252,38 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
  		if (this.stopped || !this.altScreenActive) return;
  		const width = Math.max(1, this.terminal.columns);
  		const height = Math.max(1, this.terminal.rows);
@@ -263,9 +264,13 @@ index aa062e4..32c8538 100644
 +		// the right side of the visible window below.
 +		const { sideW, mainW, visible } = this.getSidebarLayout(width);
  		const root = this.layoutRoot ?? this.implicitScrollView;
--		const nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
-+		const nextLayout = renderLayoutFrame(root, visible ? mainW : width, height, () => this.requestRender());
+-		let nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
++		let nextLayout = renderLayoutFrame(root, visible ? mainW : width, height, () => this.requestRender());
+ 		if (this.refreshSearch(nextLayout)) {
+ 			nextLayout = renderLayoutFrame(root, visible ? mainW : width, height, () => this.requestRender());
+ 		}
  		let screen = nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
+ 		screen = this.applySearchHighlights(screen, nextLayout);
  		screen = this.compositeOverlays(screen, width, height);
  		if (screen.length > height) screen = screen.slice(screen.length - height);
 +		// Pad window rows to full width and composite the layout sidebar on the
