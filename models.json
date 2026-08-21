@@ -25,6 +25,33 @@
           "contextWindow": 1050000,
         },
       }
+    },
+    "ollama": {
+      "baseUrl": "http://127.0.0.1:11434/v1",
+      "api": "openai-completions",
+      "apiKey": "ollama",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+      },
+      "models": [
+        {
+          "id": "ornith-1.5:9b",
+          "name": "Ornith 1.5 9B (Ollama)",
+          "reasoning": true,
+          "input": ["text", "image"],
+          // Ollama 0.32's OpenAI-compatible endpoint uses the server's
+          // OLLAMA_CONTEXT_LENGTH rather than a request-level num_ctx.
+          "contextWindow": 32768,
+          "maxTokens": 32768,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+          },
+        },
+      ],
     }
   }
 }
