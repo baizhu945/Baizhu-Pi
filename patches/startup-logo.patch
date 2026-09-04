@@ -1,0 +1,62 @@
+diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+--- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+@@ -45,0 +46,1 @@
++	wrapTextWithAnsi,
+@@ -204,0 +205,26 @@
++/** Text component that horizontally centers each rendered line. */
++class CenteredText extends Text {
++	private centeredWidth = 0;
++	private centeredLines: string[] = [];
++
++	override render(width: number): string[] {
++		if (this.centeredLines.length > 0 && this.centeredWidth === width) {
++			return this.centeredLines;
++		}
++		// Text.render() pads every line to width, so center the wrapped lines
++		// before padding them to the full terminal width.
++		const text = (this as unknown as { text: string }).text;
++		const wrapped = wrapTextWithAnsi(text, width);
++		let maxWidth = 0;
++		for (const line of wrapped) {
++			maxWidth = Math.max(maxWidth, visibleWidth(line));
++		}
++		const lead = maxWidth >= width ? 0 : Math.floor((width - maxWidth) / 2);
++		this.centeredWidth = width;
++		this.centeredLines = wrapped.map((line) => {
++			const lineWidth = visibleWidth(line);
++			return " ".repeat(lead) + line + " ".repeat(Math.max(0, width - lead - lineWidth));
++		});
++		return this.centeredLines.length > 0 ? this.centeredLines : [" ".repeat(width)];
++	}
++}
+@@ -964,1 +992,14 @@
+-			const logo = theme.bold(theme.fg("accent", APP_NAME)) + theme.fg("dim", ` v${this.version}`);
++			// Reuse the official setup logo, scaled up for the normal startup screen.
++			const officialLogo = ["██████", "██  ██", "████  ██", "██    ██"];
++			const bigLogo = theme.fg(
++				"accent",
++				officialLogo
++					.flatMap((line) => {
++						const scaled = [...line]
++							.map((character) => (character === " " ? " ".repeat(4) : "█".repeat(4)))
++							.join("");
++						return Array(4).fill(scaled);
++					})
++					.join("\n"),
++			);
++			const logo = `${bigLogo}\n${theme.bold(theme.fg("accent", APP_NAME))}${theme.fg("dim", ` v${this.version}`)}`;
+@@ -1005,1 +1046,4 @@
++			this.headerContainer.addChild(new Spacer(1));
++			this.headerContainer.addChild(new CenteredText(logo, 0, 0));
++			this.headerContainer.addChild(new Spacer(1));
+ 			this.builtInHeader = new ExpandableText(
+@@ -1006,2 +1050,2 @@
+-				() => `${logo}\n${compactInstructions}\n${compactOnboarding}\n\n${onboarding}`,
+-				() => `${logo}\n${expandedInstructions}\n\n${onboarding}`,
++				() => `${compactInstructions}\n${compactOnboarding}\n\n${onboarding}`,
++				() => `${expandedInstructions}\n\n${onboarding}`,
+@@ -1013,3 +1057,2 @@
+ 			// Setup UI layout
+-			this.headerContainer.addChild(new Spacer(1));
+ 			this.headerContainer.addChild(this.builtInHeader);

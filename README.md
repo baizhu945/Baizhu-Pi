@@ -1,6 +1,6 @@
 # Baizhu Pi
 
-这是一个由 Home Manager 声明式部署的 Pi coding agent 配置，重点不是“把 TUI 换个颜色”，而是把 Pi 变成一个可控、可审计、适合长时间编码任务的本地 Agent：默认大上下文模型，所有高风险工具经过权限闸门，任务可用持久化 Todo 和隔离子代理拆分，终端界面则提供固定状态栏、成本统计和可复制的对话视图。
+这是一个由 Home Manager 声明式部署的 Pi coding agent 配置：默认使用大上下文模型，所有高风险工具经过权限闸门，任务可用持久化 Todo 和隔离子代理拆分。Pi 本体固定跟随 nixpkgs，只有仍需要的命令超时行为通过 overlay 补丁维护。
 
 该模块还导入 `../cc-connect.nix`，因此同一代 Home Manager 配置会安装并启用 `cc-connect` 用户服务；Pi 的 `CC_PERMISSION_MODE=yolo` 分支正是为这类自动化运行保留的明确入口。
 
@@ -57,31 +57,17 @@ agent 从 `~/.pi/agent/agents/*.md` 读取；也可按 `agentScope` 使用当前
 
 `extensions/todo.ts` 把 Todo 状态写入 session entries，而不是只放在进程内存中，所以 `/fork` 或恢复历史后，列表会对应当前分支。它提供 `pending`、`in_progress`、`completed`、`cancelled` 四种状态，并强制同一时间最多一个 `in_progress` 项。
 
-模型会收到“3 个以上步骤主动使用 Todo”的 prompt guidance；用户可用 `/todos` 在 TUI 中查看完整列表。右侧栏从同一批 session entries 重建 Todo，因此不会和当前会话分支脱节。
+模型会收到“3 个以上步骤主动使用 Todo”的 prompt guidance；用户可用 `/todos` 在 TUI 中查看完整列表。Todo 状态从同一批 session entries 重建，因此不会和当前会话分支脱节。
 
-## 宽屏右侧状态栏与复制体验
+## TUI 与复制体验
 
-`extensions/sidebar.ts` 配合 `sidebar-layout.patch`、`sidebar-scroll.patch` 提供类似 opencode 的固定右侧栏：终端宽度达到 **120 列**时显示宽度约 **42 列**的面板，聊天区域自动让出空间，浏览历史时右栏仍固定在屏幕上。
-
-面板集中显示：
-
-- 当前模型、思考级别、输入/输出 token、缓存命中率；
-- 通过实时 USD→CNY 汇率换算的成本；
-- 上下文占用率（超过 70%/90% 使用警告/错误色）；
-- Git 分支、扩展状态和可独立滚动的 Todo 列表。
-
-宽屏底栏只显示“状态和 Todo 在右侧栏”的提示；窄屏自动退化为完整底栏，不浪费横向空间。鼠标滚轮在聊天列只滚聊天，在侧栏列只滚 Todo。
-
-`main-screen-selection.patch` 开启主屏 SGR 鼠标跟踪和应用级拖拽选择：普通拖拽只选择聊天列，不把右侧栏一起复制，释放时自动写入终端剪贴板。`unwrap-copy.patch` 为硬换行加不可见边界标记，复制长段落时不会把显示换行错误地变成多余的换行符；终端原生的 Shift+拖拽选择仍由终端处理。
+Pi 0.84.4 已原生提供全屏模式的鼠标选择、滚轮、双击单词选择和复制控制；普通模式继续交给终端处理原生文本选择。配置中的 `extensions/sidebar.ts` 保留为兼容 0.84.4 公共 API 的底栏扩展，显示 token、美元成本、上下文、模型、分支、状态和 Todo 摘要。启动界面额外通过 `startup-logo.patch` 显示居中的大号 Pi logo。
 
 ## 成本、命令执行与补丁
 
-- `currency-rate.ts` 会在 session 启动时从 `open.er-api.com` 或 `frankfurter.app` 获取 USD→CNY 汇率，成功后每 6 小时刷新，失败 10 分钟后重试；离线时回退到 7.2。
-- `cost-cny.patch` 让 Pi 底栏显示 `¥` 而不是 `$`，读取扩展写入的 `PI_USD_CNY_RATE`。
-- `bash-timeout.patch` 让模型未指定超时时使用并显示 120 秒，模型显式传值仍优先。
-- `sidebar-layout.patch` 同时增加 extension sidebar/right-reserved-width API、viewport 内部滚动和启动页的大型 logo，保证侧栏扩展不覆盖聊天内容。
+- `startup-logo.patch` 在启动界面显示放大的 Pi logo，同时保留版本号和可展开的启动帮助。
 
-注意：人民币换算只覆盖 Pi 主 TUI 的底栏和右侧栏；子代理查看器的 usage 行仍按 Pi 原始逻辑显示 USD。
+右侧栏相关补丁、人民币换算扩展和复制换行补丁已移除；这些功能要么已由 0.84.4 上游实现，要么依赖已经删除的私有 TUI API。
 
 ## 网络与浏览器数据边界
 
@@ -110,6 +96,6 @@ Home Manager 将配置写入以下位置：
 
 ## 维护提示
 
-修改 `pi.nix` 的 overlay patch、Pi 版本或扩展 API 后，应优先检查：权限闸门是否仍覆盖新增工具、sidebar patch 与 `setExtensionSidebar` API 是否匹配、子代理的进程组终止是否仍能清理孙进程，以及模型目录是否继续提供 1,050,000 上下文。
+修改 `pi.nix` 的 overlay patch、Pi 版本或扩展 API 后，应优先检查：补丁是否无 fuzz 应用、扩展是否只使用当前版本的公共 API、权限闸门是否仍覆盖新增工具、子代理的进程组终止是否仍能清理孙进程，以及模型目录是否继续提供 1,050,000 上下文。
 
 当前 `skills.nix` 的外部 `builtins.fetchGit` 使用 `main`，没有固定 revision/hash；若需要严格可复现，应在更新技能时固定这些输入。扩展源码由 Home Manager 以声明式文件方式部署，不建议直接修改 `~/.pi/agent/` 下的生成文件。

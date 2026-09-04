@@ -1,21 +1,12 @@
 { config, pkgs, lib, ... }:
 
 {
-  # 用 nixpkgs overlay 给 pi 打补丁：底部消费金额以人民币（¥）显示，而非美元（$）
-  # 补丁见 cost-cny.patch；汇率由 currency-rate.ts 扩展实时抓取写入 PI_USD_CNY_RATE
-  # （扩展不可用时回退到固定值 7.2）
-  # bash-timeout.patch：模型未传 timeout 时默认 120s（展示并执行），恢复命令卡片上
-  # 始终显示 timeout 的行为（见 0.84.1 升级前的默认显示）
+  # 0.84.4 已原生提供选择、滚轮和复制逻辑；这里只保留启动界面的大号 logo
+  # 补丁。其余旧补丁依赖已经移除或已被上游实现的 TUI API。
   nixpkgs.overlays = [
     (final: prev: {
       pi-coding-agent = prev.pi-coding-agent.overrideAttrs (old: {
-        patches = (old.patches or [ ]) ++ [ 
-          ./patches/cost-cny.patch 
-          ./patches/sidebar-layout.patch 
-          ./patches/bash-timeout.patch 
-          ./patches/main-screen-selection.patch 
-          ./patches/unwrap-copy.patch 
-          ./patches/sidebar-scroll.patch ];
+        patches = (old.patches or [ ]) ++ [ ./patches/startup-logo.patch ];
       });
     })
   ];
@@ -62,7 +53,6 @@
       packages = [
         "npm:@d3ara1n/pi-ask-user@2.4.2"
         "npm:pi-web-access@0.18.0"
-        "npm:@narumitw/pi-goal"
 
         # "git:github.com/obra/superpowers"
       ];
