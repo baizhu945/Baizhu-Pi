@@ -10,17 +10,20 @@
  * 询问对话框提供三个选择：
  *   - Yes          -> 仅放行这一次调用
  *   - No (Esc)     -> 拦截这次调用
- *   - Always allow -> 本对话内放行所有此类调用（/new、/resume、/reload 时重置）
+ *   - Always allow -> 本对话内放行同一种工具（/new、/resume、/reload 时重置）
  *
- * 非交互模式（无 UI）下无法询问用户，一律拦截。
+ * 非交互模式（无 UI）下无法询问用户，一律拦截；但 subagent launcher
+ * 会把 agent markdown 中显式声明的 tools 白名单传给子进程。子进程只对
+ * 该白名单内的工具放行，这对应 OpenCode 的 per-agent permission 配置。
  */
 
+import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const READ_ONLY_TOOLS = new Set(["read", "grep", "ls", "find"]);
 // 安全工具（调度/状态类）：自身不直接改动文件或执行命令，副作用受到二次把关：
 // - subagent 工具 spawn 的 explore 子代理只有只读工具；general 子代理的
-//   write/edit/bash 在无 UI 时同样会被这里拦截。
+//   write/edit/bash 只有在 general 的显式 tools 白名单中才会放行。
 // - todo 工具只维护会话内任务列表（session entries），不碰文件系统。
 const SAFE_TOOLS = new Set(["subagent", "todo"]);
 // 网络只读工具（pi-web-access 包）：web 搜索 / URL 抓取 / 搜索结果取内容，
@@ -29,13 +32,65 @@ const SAFE_TOOLS = new Set(["subagent", "todo"]);
 // ask_user（@d3ara1n/pi-ask-user）：纯交互面板，只展示选项等待用户选择，无副作用。
 const NETWORK_READ_TOOLS = new Set(["web_search", "fetch_content", "get_search_content", "source_check", "ask_user"]);
 
+function getSubagentToolAllowlist(): Set<string> {
+  if (process.env.PI_SUBAGENT_CHILD !== "1") return new Set();
+  return new Set(
+    (process.env.PI_SUBAGENT_ALLOWED_TOOLS ?? "")
+      .split(",")
+      .map((tool) => tool.trim())
+      .filter(Boolean),
+  );
+}
+
+function inputString(input: Record<string, unknown>, key: string): string {
+  const value = input[key];
+  return typeof value === "string" ? value : "";
+}
+
+function isSensitiveRequest(toolName: string, input: Record<string, unknown>, cwd: string, isChild: boolean): boolean {
+  const inputKeys = ["path", "file_path", "glob", "pattern"];
+  if (toolName === "bash") inputKeys.push("command");
+  const rawValues = inputKeys.map((key) => inputString(input, key)).filter(Boolean);
+  const raw = rawValues.join("\n").toLowerCase();
+  if (!raw) return false;
+
+  const paths = rawValues.map((value) => path.resolve(cwd, value).split(path.sep).join("/").toLowerCase());
+  for (const candidate of paths) {
+    const basename = candidate.split("/").pop() ?? "";
+    if (/^\.env(?:\.[^/]+)?$/.test(basename) && basename !== ".env.example") return true;
+    if (/^(?:auth|credentials|secret|token|private-key)(?:\.[^/]*)?$/.test(basename)) return true;
+    if (/(?:^|\/)\.(?:ssh|gnupg|aws)(?:\/|$)/.test(candidate)) return true;
+    if (/(?:\/google-chrome|\/chromium|\/mozilla\/firefox)(?:\/|$)/.test(candidate) &&
+      /(?:cookies|login data|local state|key4\.db)$/i.test(basename)) return true;
+    if (/^\/proc\/[^/]+\/(?:environ|mem)(?:\/|$)/.test(candidate)) return true;
+  }
+
+  // Pattern-based scans can expose the same data even when the sensitive
+  // filename is not part of the path argument.
+  if ((toolName === "find" || toolName === "grep") && /(?:^|\/)proc(?:\/|$)/.test(raw) &&
+    /environ|mem|\/fd(?:\/|$)/.test(raw)) return true;
+
+  // This is deliberately narrow: it catches obvious credential dumps, not a
+  // general shell language. Pi's extension gate is not an OS sandbox.
+  if (isChild && toolName === "bash" &&
+    (/(?:^|[;&|()\s])(?:env|printenv)(?:$|[;&|()\s])/.test(raw) ||
+      /(?:auth\.json|(?:^|[\/\s])\.env(?:[\/\s]|$)|\/proc\/[^\s/]+\/environ)/.test(raw))) return true;
+
+  return false;
+}
+
 export default function (pi: ExtensionAPI) {
-  // "Always allow" 状态：仅对当前对话生效
-  let alwaysAllow = false;
+  // "Always allow" 状态：按工具分别记录，仅对当前对话生效。
+  // 允许 write 后不应顺便让 bash/未知工具也失去确认。
+  const alwaysAllowTools = new Set<string>();
+  // JSON 子代理没有 UI，不能等待 permission prompt。只有 launcher 根据
+  // agent 的显式 tools 字段传入的工具才可免确认；未列出的工具仍不可用，
+  // 即使某个其它扩展注册了它。
+  const subagentToolAllowlist = getSubagentToolAllowlist();
 
   // 会话切换（/new、/resume、/fork 等）时重置，确保只影响同一个对话
   pi.on("session_start", () => {
-    alwaysAllow = false;
+    alwaysAllowTools.clear();
   });
 
   pi.on("tool_call", async (event, ctx) => {
@@ -44,6 +99,23 @@ export default function (pi: ExtensionAPI) {
     // 全自动模式（由 cc-connect 通过环境变量 CC_PERMISSION_MODE=yolo 注入）：
     // 直接放行所有工具，不再弹出权限确认卡片。
     if (process.env.CC_PERMISSION_MODE === "yolo") {
+      return undefined;
+    }
+
+    const isChild = process.env.PI_SUBAGENT_CHILD === "1";
+    if (isSensitiveRequest(toolName, event.input as Record<string, unknown>, ctx.cwd, isChild)) {
+      if (isChild || !ctx.hasUI) {
+        return {
+          block: true,
+          reason: `${toolName} blocked: sensitive credential or process-environment path`,
+        };
+      }
+
+      const choice = await ctx.ui.select(
+        `Allow sensitive ${toolName}?\nThis may expose credentials or process environment data.`,
+        ["Yes", "No"],
+      );
+      if (choice !== "Yes") return { block: true, reason: "Sensitive access rejected by user" };
       return undefined;
     }
 
@@ -61,8 +133,16 @@ export default function (pi: ExtensionAPI) {
       return undefined;
     }
 
+    // OpenCode 的 general agent 可以在自己的权限规则中允许 edit/bash。
+    // Pi 子代理使用 JSON 模式没有 UI，因此这里采用等价的显式 agent 工具
+    // 白名单：general 声明了 write/edit/bash 时放行它们，explore 没声明
+    // 时既不会出现在工具列表，也不会绕过本 gate。
+    if (subagentToolAllowlist.has(toolName)) {
+      return undefined;
+    }
+
     // 已选择 Always allow：本次对话内直接放行
-    if (alwaysAllow) {
+    if (alwaysAllowTools.has(toolName)) {
       return undefined;
     }
 
@@ -88,7 +168,7 @@ export default function (pi: ExtensionAPI) {
     );
 
     if (choice === "Always allow") {
-      alwaysAllow = true;
+      alwaysAllowTools.add(toolName);
       return undefined;
     }
     if (choice !== "Yes") {

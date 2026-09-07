@@ -27,7 +27,7 @@
 - 直接放行调度/状态：`subagent`、`todo`；
 - 直接放行网络只读和交互：`web_search`、`fetch_content`、`get_search_content`、`source_check`、`ask_user`；
 - `bash`、`write`、`edit` 以及任何未知/新增工具都必须询问；
-- 交互式对话框提供 **Yes / No / Always allow**，`Always allow` 只持续到当前会话切换；
+- 交互式对话框提供 **Yes / No / Always allow**，`Always allow` 只对当前工具且只持续到当前会话切换；
 - 没有 UI 的非交互运行会直接拦截需要询问的工具，而不是静默放行。
 
 `CC_PERMISSION_MODE=yolo` 是给 `cc-connect` 自动任务使用的明确例外：该环境变量为 `yolo` 时跳过闸门。除此之外，新增工具默认落入“需要询问”的一侧，降低扩展升级后意外获得写入/执行权限的风险。
@@ -44,14 +44,14 @@
 | parallel | 同时处理独立任务，最多 8 项，最多 4 个并发进程。 |
 | chain | 顺序执行多个 agent，下一步任务可用 `{previous}` 接收上一步最终输出。 |
 
-agent 从 `~/.pi/agent/agents/*.md` 读取；也可按 `agentScope` 使用当前项目最近的 `.pi/agents`。执行项目 agent 时默认再次确认，因为它们由仓库控制；同名项目 agent 会覆盖用户 agent。内置配置中：
+agent 从 `~/.pi/agent/agents/*.md` 读取；也可按 `agentScope` 使用当前项目最近的 `.pi/agents`。执行项目 agent 时默认再次确认，因为它们由仓库控制；无 UI 的 JSON/自动化运行会拒绝项目 agent，只有显式传入 `confirmProjectAgents: false` 才会继续。同名项目 agent 会覆盖用户 agent。内置配置中：
 
-- `explore`：只读的快速代码库搜索/定位 agent；
-- `general`：可执行多步骤研究和任务的通用 agent。
+- `general`：模仿 OpenCode 的通用执行 agent，暴露 `read`、`grep`、`find`、`ls`、`write`、`edit`、`bash` 以及 `web_search`、`fetch_content`、`get_search_content`、`source_check`；不暴露 `subagent`，因此不能递归派生子代理；
+- `explore`：只读的快速代码库搜索/定位 agent，只暴露 `read`、`grep`、`find`、`ls`。
 
-每个子代理都有硬超时，超时或取消时先对整个进程组发送 SIGTERM，宽限后发送 SIGKILL，并回收残留管道；单项输出还有限制，避免子代理拖垮主会话。
+子代理是 JSON/无 UI 进程：主会话里的 `bash`、`write`、`edit` 仍按原 gate 询问；子代理只有 frontmatter 显式声明的工具会由 launcher 同时放入 Pi 的 `--tools` allowlist，并由 gate 作为该 agent 的权限 profile 放行。未声明的工具既不可见也不会被静默批准。子进程中的每个工具结果限制为 32 KiB，送入模型的工具结果总量限制为 512 KiB，避免一次大规模 grep/find/web 页面拖垮子代理上下文。子代理的 `cwd` 默认必须位于父 `cwd` 内；访问外部目录需要显式 `allowExternalCwd: true`。每个子代理都有硬超时，超时或取消时先对整个进程组发送 SIGTERM，宽限后发送 SIGKILL，并回收残留管道；可恢复的工具错误作为 warnings/diagnostics 保留并回传，只有进程、provider、超时或无最终输出等致命错误才让任务失败。保存到主会话的 transcript 限制为每项 256 KiB，最终输出限制为 64 KiB。上述限制是进程内 gate，不是 OS 沙箱；`bash` 仍应只执行任务所需的安全命令。
 
-完整运行记录保存在主会话 tool result 中。`Alt+S` 或 `/subagents` 打开全屏查看器，可循环浏览每个子代理的任务、思考、工具调用、结果、模型和用量；`Esc`/`q` 退出，方向键和 PgUp/PgDn 滚动。
+受限的运行记录保存在主会话 tool result 中。`Alt+S` 或 `/subagents` 打开全屏查看器，可循环浏览每个子代理的任务、思考、工具调用、结果、诊断、模型和用量；若超过上限，查看器会明确显示 transcript 已截断。`Esc`/`q` 退出，方向键和 PgUp/PgDn 滚动。
 
 ## Todo：分支正确的任务状态
 
@@ -74,9 +74,9 @@ Pi 0.84.4 已原生提供全屏模式的鼠标选择、滚轮、双击单词选�
 `pi.nix` 安装 `pi-web-access`，并写入 `~/.pi/web-search.json`：
 
 - 仅额外允许本机 Clash/Mihomo fake-IP 使用的 `198.18.0.0/15`，不会因此放行 localhost、私网或字面 IP；
-- `allowBrowserCookies = true` 是显式 opt-in，用于 Gemini Web 的 Chromium cookie 提取。
+- `allowBrowserCookies = false` 默认关闭；只有明确需要 Gemini Web 的 Chromium cookie 提取时才应手动打开。
 
-这使公网抓取能适配当前代理的 fake-IP DNS，同时保留包自身的 SSRF 预检。若不需要 Gemini Web cookie，可关闭该选项。
+这使公网抓取能适配当前代理的 fake-IP DNS，同时保留包自身的 SSRF 预检。
 
 ## 技能与文件落点
 
@@ -98,4 +98,4 @@ Home Manager 将配置写入以下位置：
 
 修改 `pi.nix` 的 overlay patch、Pi 版本或扩展 API 后，应优先检查：补丁是否无 fuzz 应用、扩展是否只使用当前版本的公共 API、权限闸门是否仍覆盖新增工具、子代理的进程组终止是否仍能清理孙进程，以及模型目录是否继续提供 1,050,000 上下文。
 
-当前 `skills.nix` 的外部 `builtins.fetchGit` 使用 `main`，没有固定 revision/hash；若需要严格可复现，应在更新技能时固定这些输入。扩展源码由 Home Manager 以声明式文件方式部署，不建议直接修改 `~/.pi/agent/` 下的生成文件。
+`skills.nix` 的外部技能已经固定 revision 和 hash；更新时应同时重新验证内容与 hash。扩展源码由 Home Manager 以声明式文件方式部署，不建议直接修改 `~/.pi/agent/` 下的生成文件。

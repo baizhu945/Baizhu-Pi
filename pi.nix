@@ -38,9 +38,8 @@
       # 项目级资源（.pi/settings.json、项目 skills 等）默认询问是否信任
       defaultProjectTrust = "ask";
 
-      # 默认模型：DeepSeek V4 Flash
       # （defaultProvider 必须与 defaultModel 一起设置，模型解析器两者都需要）
-      defaultProvider = "openai";
+      defaultProvider = "openai-codex";
       defaultModel = "gpt-5.6-luna";
       defaultThinkingLevel = "xhigh";
 
@@ -51,8 +50,11 @@
       retry.maxRetries = 5;
 
       packages = [
-        "npm:@d3ara1n/pi-ask-user@2.4.2"
-        "npm:pi-web-access@0.18.0"
+        "npm:@juicesharp/rpiv-ask-user-question"
+        "npm:pi-web-access"
+        "npm:@narumitw/pi-goal"
+        "npm:@juicesharp/rpiv-todo"
+        "npm:@tintinweb/pi-subagents"
 
         # "git:github.com/obra/superpowers"
       ];
@@ -65,24 +67,19 @@
     # pi-web-access 配置：本机 Clash/Mihomo TUN 代理把公网域名解析成 198.18.0.0/15
     # 的 fake-IP，导致包内 SSRF DNS 预检拦截所有抓取。仅放行该代理合成网段
     # （私网/localhost/字面 IP 仍被拦截，安全语义不变）。
-    # allowBrowserCookies：启用 Gemini Web 的 Chromium cookie 提取（opt-in，
-    # 默认关闭以免触碰浏览器数据）。
+    # allowBrowserCookies：启用 Gemini Web 的 Chromium cookie 提取；默认关闭，
+    # 避免子代理/网络扩展读取浏览器会话数据。需要时再显式改为 true。
     ".pi/web-search.json".text = ''
       {
         "ssrf": {
           "allowRanges": ["198.18.0.0/15"]
         },
-        "allowBrowserCookies": true
+        "allowBrowserCookies": false
       }
     '';
 
     ".pi/agent/extensions/" = {
       source = ./extensions;
-      recursive = true;
-    };
-
-    ".pi/agent/agents/" = {
-      source = ./agents;
       recursive = true;
     };
 
