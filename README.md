@@ -21,16 +21,15 @@
 
 ## 最重要的特色：权限闸门
 
-`extensions/permission-gate.ts` 采用“安全白名单，其余默认询问”的策略：
+`extensions/permission-gate.ts` 提供三档运行时策略，可通过 `/permission allow`、`/permission ask`、`/permission deny` 切换；不带参数时会打开选择器：
 
-- 直接放行本地只读：`read`、`grep`、`ls`、`find`；
-- 直接放行调度/状态：`subagent`、`todo`；
-- 直接放行网络只读和交互：`web_search`、`fetch_content`、`get_search_content`、`source_check`、`ask_user`；
-- `bash`、`write`、`edit` 以及任何未知/新增工具都必须询问；
-- 交互式对话框提供 **Yes / No / Always allow**，`Always allow` 只对当前工具且只持续到当前会话切换；
-- 没有 UI 的非交互运行会直接拦截需要询问的工具，而不是静默放行。
+- `allow`：所有工具直接放行；
+- `ask`（默认）：`read`、网络只读工具，以及 `TaskList`、`TaskGet`、`TaskOutput` 直接放行；`TaskCreate`、`TaskUpdate`、`TaskStop`、`TaskExecute`、`Agent`、`SubagentWorkflow`、`get_subagent_result`、`steer_subagent` 和三个 goal 工具也直接放行；
+- `ask` 的其余工具：`ls`、`find`、`grep`、`bash`、`powershell`、`write`、`edit`、`ask_user_question` 以及任何未知/新增工具询问用户；无 UI 时无法询问的工具直接拦截；
+- `deny`：所有工具直接拦截。配置中没有静态 deny 规则，`deny` 仅是运行时模式；
+- 交互式对话框提供 **Yes / No / Always allow**，`Always allow` 只对当前工具且只持续到当前会话切换。
 
-`CC_PERMISSION_MODE=yolo` 是给 `cc-connect` 自动任务使用的明确例外：该环境变量为 `yolo` 时跳过闸门。除此之外，新增工具默认落入“需要询问”的一侧，降低扩展升级后意外获得写入/执行权限的风险。
+`CC_PERMISSION_MODE=yolo` 是给 `cc-connect` 自动任务使用的明确入口：它让 Pi 以 `allow` 模式启动；运行中仍可用 `/permission ask` 或 `/permission deny` 覆盖本次 Pi 进程的模式。新增工具默认落入“需要询问”的一侧，降低扩展升级后意外获得写入/执行权限的风险。
 
 ## 子代理编排与可视化
 

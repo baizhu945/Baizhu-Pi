@@ -53,8 +53,8 @@
         "npm:@juicesharp/rpiv-ask-user-question"
         "npm:pi-web-access"
         "npm:@narumitw/pi-goal"
-        "npm:@juicesharp/rpiv-todo"
         "npm:@tintinweb/pi-subagents"
+        "npm:@tintinweb/pi-tasks"
 
         # "git:github.com/obra/superpowers"
       ];

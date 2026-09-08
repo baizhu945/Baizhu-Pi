@@ -1,36 +1,78 @@
 /**
  * Permission Gate Extension for Pi
  *
- * 权限策略：白名单工具直接放行，其余所有工具一律询问用户：
- *   - read/grep/ls/find                     -> 总是放行（本地只读）
- *   - subagent/todo                         -> 总是放行（调度/状态，副作用受二次把关）
- *   - web_search/fetch_content/.../ask_user -> 总是放行（网络只读 / 交互面板）
- *   - 其他所有工具（bash、write、edit 及任何未知或新增工具）-> 询问用户
+ * 默认权限策略（/permission ask）：
+ *   - read、网络读取和任务读取工具 -> allow
+ *   - 任务创建/更新/停止、子代理编排和 goal 工具 -> allow
+ *   - ls/grep/find、写入、命令执行、交互以及任何未知工具 -> ask
+ *   - 不存在静态 deny；deny 只作为 /permission deny 的运行时模式
  *
- * 询问对话框提供三个选择：
+ * /permission 支持三种运行时模式：
+ *   - allow -> 放行所有工具
+ *   - ask   -> 遵循上面的细分策略
+ *   - deny  -> 拒绝所有工具
+ *
+ * ask 模式的确认框提供三个选择：
  *   - Yes          -> 仅放行这一次调用
  *   - No (Esc)     -> 拦截这次调用
- *   - Always allow -> 本对话内放行同一种工具（/new、/resume、/reload 时重置）
+ *   - Always allow -> 本对话内放行同一种工具（会话切换时重置）
  *
- * 非交互模式（无 UI）下无法询问用户，一律拦截；但 subagent launcher
- * 会把 agent markdown 中显式声明的 tools 白名单传给子进程。子进程只对
- * 该白名单内的工具放行，这对应 OpenCode 的 per-agent permission 配置。
+ * 非交互模式（无 UI）下无法询问用户，因此 ask 模式中未列入 allow 白名单的
+ * 工具会被拦截。子代理 launcher 传入的显式工具白名单仍作为子代理自身的
+ * capability profile 保留；/permission allow 和 deny 会覆盖该 profile。
  */
 
-import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const READ_ONLY_TOOLS = new Set(["read", "grep", "ls", "find"]);
-// 安全工具（调度/状态类）：自身不直接改动文件或执行命令，副作用受到二次把关：
-// - subagent 工具 spawn 的 explore 子代理只有只读工具；general 子代理的
-//   write/edit/bash 只有在 general 的显式 tools 白名单中才会放行。
-// - todo 工具只维护会话内任务列表（session entries），不碰文件系统。
-const SAFE_TOOLS = new Set(["subagent", "todo"]);
-// 网络只读工具（pi-web-access 包）：web 搜索 / URL 抓取 / 搜索结果取内容，
-// 不改动本地文件（GitHub 克隆仅写入包自身缓存目录）；抓取自带 SSRF DNS 预检
-// （拦截 localhost/私有 IP），且不执行任意本地命令。
-// ask_user（@d3ara1n/pi-ask-user）：纯交互面板，只展示选项等待用户选择，无副作用。
-const NETWORK_READ_TOOLS = new Set(["web_search", "fetch_content", "get_search_content", "source_check", "ask_user"]);
+export type PermissionMode = "allow" | "ask" | "deny";
+
+const PERMISSION_MODES: readonly PermissionMode[] = ["allow", "ask", "deny"];
+
+// 当前策略中自动放行的读取工具。ls、grep、find 按用户要求保留为 ask。
+const READ_ONLY_TOOLS = new Set([
+  "read",
+  "web_search",
+  "fetch_content",
+  "get_search_content",
+  "source_check",
+  // pi-tasks：读取任务/任务输出，不修改任务或启动进程。
+  "TaskList",
+  "TaskGet",
+  "TaskOutput",
+]);
+
+// 明确要求自动放行的调度/任务/goal 工具。
+const SAFE_TOOLS = new Set([
+  // 兼容旧版/其它 subagent 扩展的名称。
+  "subagent",
+  "todo",
+  // @tintinweb/pi-subagents。
+  "Agent",
+  "SubagentWorkflow",
+  "get_subagent_result",
+  "steer_subagent",
+  "StructuredOutput",
+  // @tintinweb/pi-tasks：创建任务，以及启动任务对应的子代理。
+  "TaskCreate",
+  "TaskUpdate",
+  "TaskStop",
+  "TaskExecute",
+  // @narumitw/pi-goal。
+  "goal_blocked",
+  "goal_complete",
+  "goal_wait",
+]);
+
+function getInitialPermissionMode(): PermissionMode {
+  const inheritedMode = process.env.PI_PERMISSION_MODE?.toLowerCase();
+  if (PERMISSION_MODES.includes(inheritedMode as PermissionMode)) {
+    return inheritedMode as PermissionMode;
+  }
+
+  // cc-connect 的显式自动任务入口保持原有语义；用户随后可用
+  // `/permission ask` 或 `/permission deny` 覆盖本次 Pi 进程的初始模式。
+  return process.env.CC_PERMISSION_MODE === "yolo" ? "allow" : "ask";
+}
 
 function getSubagentToolAllowlist(): Set<string> {
   if (process.env.PI_SUBAGENT_CHILD !== "1") return new Set();
@@ -42,128 +84,134 @@ function getSubagentToolAllowlist(): Set<string> {
   );
 }
 
-function inputString(input: Record<string, unknown>, key: string): string {
-  const value = input[key];
-  return typeof value === "string" ? value : "";
+function parsePermissionMode(args: string): PermissionMode | undefined {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length !== 1) return undefined;
+  const mode = tokens[0].toLowerCase();
+  return PERMISSION_MODES.includes(mode as PermissionMode) ? (mode as PermissionMode) : undefined;
 }
 
-function isSensitiveRequest(toolName: string, input: Record<string, unknown>, cwd: string, isChild: boolean): boolean {
-  const inputKeys = ["path", "file_path", "glob", "pattern"];
-  if (toolName === "bash") inputKeys.push("command");
-  const rawValues = inputKeys.map((key) => inputString(input, key)).filter(Boolean);
-  const raw = rawValues.join("\n").toLowerCase();
-  if (!raw) return false;
+function formatPermissionMode(mode: PermissionMode): string {
+  return `permission: ${mode}`;
+}
 
-  const paths = rawValues.map((value) => path.resolve(cwd, value).split(path.sep).join("/").toLowerCase());
-  for (const candidate of paths) {
-    const basename = candidate.split("/").pop() ?? "";
-    if (/^\.env(?:\.[^/]+)?$/.test(basename) && basename !== ".env.example") return true;
-    if (/^(?:auth|credentials|secret|token|private-key)(?:\.[^/]*)?$/.test(basename)) return true;
-    if (/(?:^|\/)\.(?:ssh|gnupg|aws)(?:\/|$)/.test(candidate)) return true;
-    if (/(?:\/google-chrome|\/chromium|\/mozilla\/firefox)(?:\/|$)/.test(candidate) &&
-      /(?:cookies|login data|local state|key4\.db)$/i.test(basename)) return true;
-    if (/^\/proc\/[^/]+\/(?:environ|mem)(?:\/|$)/.test(candidate)) return true;
-  }
-
-  // Pattern-based scans can expose the same data even when the sensitive
-  // filename is not part of the path argument.
-  if ((toolName === "find" || toolName === "grep") && /(?:^|\/)proc(?:\/|$)/.test(raw) &&
-    /environ|mem|\/fd(?:\/|$)/.test(raw)) return true;
-
-  // This is deliberately narrow: it catches obvious credential dumps, not a
-  // general shell language. Pi's extension gate is not an OS sandbox.
-  if (isChild && toolName === "bash" &&
-    (/(?:^|[;&|()\s])(?:env|printenv)(?:$|[;&|()\s])/.test(raw) ||
-      /(?:auth\.json|(?:^|[\/\s])\.env(?:[\/\s]|$)|\/proc\/[^\s/]+\/environ)/.test(raw))) return true;
-
-  return false;
+function blockedResult(reason: string) {
+  return { block: true, reason };
 }
 
 export default function (pi: ExtensionAPI) {
-  // "Always allow" 状态：按工具分别记录，仅对当前对话生效。
-  // 允许 write 后不应顺便让 bash/未知工具也失去确认。
+  // 使用对象而不是普通局部字符串，方便 command handler 与 tool_call handler
+  // 共享同一份可变的运行时模式。
+  const permissionState: { mode: PermissionMode } = { mode: getInitialPermissionMode() };
+
+  // “Always allow” 只对 ask 模式有效，并且只持续到会话边界。
   const alwaysAllowTools = new Set<string>();
-  // JSON 子代理没有 UI，不能等待 permission prompt。只有 launcher 根据
-  // agent 的显式 tools 字段传入的工具才可免确认；未列出的工具仍不可用，
-  // 即使某个其它扩展注册了它。
+
+  // JSON 子代理没有 UI，不能等待 permission prompt。只有 launcher 根据 agent
+  // 的显式 tools 字段传入的工具才可免确认；未列出的工具仍不可用。
   const subagentToolAllowlist = getSubagentToolAllowlist();
 
-  // 会话切换（/new、/resume、/fork 等）时重置，确保只影响同一个对话
-  pi.on("session_start", () => {
+  const updateStatus = (ctx: { ui: { setStatus(key: string, text: string | undefined): void } }) => {
+    ctx.ui.setStatus("permission-gate", formatPermissionMode(permissionState.mode));
+  };
+
+  pi.registerCommand("permission", {
+    description: "Show or set the tool permission mode: allow, ask, or deny",
+    getArgumentCompletions: (prefix) => {
+      const normalizedPrefix = prefix.trim().toLowerCase();
+      return PERMISSION_MODES
+        .filter((mode) => mode.startsWith(normalizedPrefix))
+        .map((mode) => ({
+          value: mode,
+          label: mode,
+          description:
+            mode === "allow"
+              ? "Allow every tool"
+              : mode === "ask"
+                ? "Allow reads/tasks; ask for writes, commands, and other tools"
+                : "Block every tool",
+        }));
+    },
+    handler: async (args, ctx) => {
+      let selectedMode = parsePermissionMode(args);
+
+      if (!args.trim()) {
+        if (!ctx.hasUI) {
+          updateStatus(ctx);
+          ctx.ui.notify(`Current permission mode: ${permissionState.mode}`, "info");
+          return;
+        }
+
+        selectedMode = (await ctx.ui.select(
+          `Permission mode (current: ${permissionState.mode})`,
+          [...PERMISSION_MODES],
+        )) as PermissionMode | undefined;
+      }
+
+      if (!selectedMode) {
+        ctx.ui.notify("Usage: /permission allow|ask|deny", "warning");
+        return;
+      }
+
+      permissionState.mode = selectedMode;
+      // 让之后启动的子 Pi 进程继承同一档模式；每个子进程仍会独立加载本扩展。
+      process.env.PI_PERMISSION_MODE = selectedMode;
+      // 切换模式后不保留 ask 模式中用户临时授予的工具。
+      alwaysAllowTools.clear();
+      updateStatus(ctx);
+      ctx.ui.notify(`Permission mode: ${permissionState.mode}`, "info");
+    },
+  });
+
+  // 会话切换时只重置 ask 模式的临时 Always allow 授权；/permission 选择的
+  // 模式属于当前 Pi 进程，切换 /new、/resume、/fork 不应意外改变它。
+  pi.on("session_start", (_event, ctx) => {
     alwaysAllowTools.clear();
+    updateStatus(ctx);
   });
 
   pi.on("tool_call", async (event, ctx) => {
     const toolName = event.toolName;
 
-    // 全自动模式（由 cc-connect 通过环境变量 CC_PERMISSION_MODE=yolo 注入）：
-    // 直接放行所有工具，不再弹出权限确认卡片。
-    if (process.env.CC_PERMISSION_MODE === "yolo") {
+    if (permissionState.mode === "allow") {
       return undefined;
     }
 
-    const isChild = process.env.PI_SUBAGENT_CHILD === "1";
-    if (isSensitiveRequest(toolName, event.input as Record<string, unknown>, ctx.cwd, isChild)) {
-      if (isChild || !ctx.hasUI) {
-        return {
-          block: true,
-          reason: `${toolName} blocked: sensitive credential or process-environment path`,
-        };
-      }
+    if (permissionState.mode === "deny") {
+      return blockedResult(`Permission mode is deny; ${toolName} is blocked`);
+    }
 
-      const choice = await ctx.ui.select(
-        `Allow sensitive ${toolName}?\nThis may expose credentials or process environment data.`,
-        ["Yes", "No"],
-      );
-      if (choice !== "Yes") return { block: true, reason: "Sensitive access rejected by user" };
+    if (READ_ONLY_TOOLS.has(toolName) || SAFE_TOOLS.has(toolName)) {
       return undefined;
     }
 
-    if (READ_ONLY_TOOLS.has(toolName)) {
-      return undefined;
-    }
-
-    // 安全工具放行（subagent 调度、todo 状态管理等），副作用仍受本 gate 约束
-    if (SAFE_TOOLS.has(toolName)) {
-      return undefined;
-    }
-
-    // 网络只读工具放行（web 搜索/抓取、ask_user 交互面板）
-    if (NETWORK_READ_TOOLS.has(toolName)) {
-      return undefined;
-    }
-
-    // OpenCode 的 general agent 可以在自己的权限规则中允许 edit/bash。
-    // Pi 子代理使用 JSON 模式没有 UI，因此这里采用等价的显式 agent 工具
-    // 白名单：general 声明了 write/edit/bash 时放行它们，explore 没声明
-    // 时既不会出现在工具列表，也不会绕过本 gate。
+    // OpenCode 风格的子代理 capability profile：它只在子代理无 UI 时使用，
+    // 让显式配置的 general agent 仍可执行其声明的工具。主会话的 /permission
+    // 模式不会被该分支绕过：allow/deny 已在上面优先处理。
     if (subagentToolAllowlist.has(toolName)) {
       return undefined;
     }
 
-    // 已选择 Always allow：本次对话内直接放行
+    // 已选择 Always allow：仅在 ask 模式下生效。
     if (alwaysAllowTools.has(toolName)) {
       return undefined;
     }
 
-    // 无 UI（非交互模式）时无法征询用户，一律拦截
+    // 无 UI（非交互模式）时无法征询用户，一律拦截 ask 工具。
     if (!ctx.hasUI) {
-      return {
-        block: true,
-        reason: `${toolName} requires user approval (no UI available)`,
-      };
+      return blockedResult(`${toolName} requires user approval (no UI available)`);
     }
 
-    // 其余所有工具（bash / write / edit 及任何未知、新增工具）都询问用户
+    const input = (event.input ?? {}) as Record<string, unknown>;
     const detail =
-      toolName === "bash"
-        ? `Command: ${(event.input as { command?: string }).command ?? ""}`
+      toolName === "bash" || toolName === "powershell"
+        ? `Command: ${typeof input.command === "string" ? input.command : JSON.stringify(input)}`
         : toolName === "write" || toolName === "edit"
-          ? `Path: ${(event.input as { path?: string }).path ?? ""}`
-          : `Input: ${JSON.stringify(event.input ?? {}).slice(0, 200)}`;
+          ? `Path: ${typeof input.path === "string" ? input.path : JSON.stringify(input)}`
+          : `Input: ${JSON.stringify(input).slice(0, 200)}`;
 
     const choice = await ctx.ui.select(
-      detail ? `Allow ${toolName}?\n${detail}` : `Allow ${toolName}?`,
+      `Allow ${toolName}?\n${detail}`,
       ["Yes", "No", "Always allow"],
     );
 
@@ -172,8 +220,8 @@ export default function (pi: ExtensionAPI) {
       return undefined;
     }
     if (choice !== "Yes") {
-      // 选择 No 或按 Esc 取消都视为拒绝
-      return { block: true, reason: "Rejected by user" };
+      // 选择 No 或按 Esc 取消都视为拒绝。
+      return blockedResult("Rejected by user");
     }
 
     return undefined;
