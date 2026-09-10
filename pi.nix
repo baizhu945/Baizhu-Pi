@@ -52,8 +52,8 @@
       packages = [
         "npm:@juicesharp/rpiv-ask-user-question"
         "npm:pi-web-access"
+        "npm:pi-subagents"
         "npm:@narumitw/pi-goal"
-        "npm:@tintinweb/pi-subagents"
         "npm:@tintinweb/pi-tasks"
 
         # "git:github.com/obra/superpowers"
