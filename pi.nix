@@ -52,9 +52,9 @@
       packages = [
         "npm:@juicesharp/rpiv-ask-user-question"
         "npm:pi-web-access"
-        "npm:pi-subagents"
         "npm:@narumitw/pi-goal"
         "npm:@tintinweb/pi-tasks"
+        "npm:@tintinweb/pi-subagents"
 
         # "git:github.com/obra/superpowers"
       ];
@@ -88,4 +88,14 @@
 
     ".pi/agent/models.json".source = ./models.json;
   };
+
+  # pi-subagents 默认给 Explore 指定 Haiku；移除该行，使其使用 inherit 模型配置。
+  home.activation.piSubagentsExploreModel = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
+    target="/home/baizhu945/.pi/agent/npm/node_modules/@tintinweb/pi-subagents/src/default-agents.ts"
+    if [ -f "$target" ]; then
+      run ${pkgs.gnused}/bin/sed -i \
+        '/^[[:space:]]*"Explore",[[:space:]]*$/,/^[[:space:]]*],[[:space:]]*$/ { /^[[:space:]]*model: "anthropic\/claude-haiku-4-5",[[:space:]]*$/d; }' \
+        "$target"
+    fi
+  '';
 }
