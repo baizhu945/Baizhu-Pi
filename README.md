@@ -1,8 +1,8 @@
 # Baizhu Pi
 
-这是一个由 Home Manager 声明式部署的 Pi coding agent 配置：默认使用大上下文模型，所有高风险工具经过权限闸门，任务可用持久化 Todo 和隔离子代理拆分。Pi 本体固定跟随 nixpkgs，只有仍需要的命令超时行为通过 overlay 补丁维护。
+这是一个由 Home Manager 声明式部署的 Pi coding agent 配置：默认使用大上下文模型，任务可用持久化 Todo 和隔离子代理拆分。Pi 本体固定跟随 nixpkgs，只有仍需要的命令超时行为通过 overlay 补丁维护。
 
-该模块还导入 `../cc-connect.nix`，因此同一代 Home Manager 配置会安装并启用 `cc-connect` 用户服务；Pi 的 `CC_PERMISSION_MODE=yolo` 分支正是为这类自动化运行保留的明确入口。
+该模块还导入 `../cc-connect.nix`，因此同一代 Home Manager 配置会安装并启用 `cc-connect` 用户服务。
 
 ## 默认行为
 
@@ -15,42 +15,19 @@
 | 重试 | 开启，最多 5 次 |
 | 项目可信度 | `defaultProjectTrust = "ask"` |
 | 上下文覆盖 | `gpt-5.6-luna/terra/sol` 在 `openai` 与 `openai-codex` 下均为 1,050,000 |
-| 子代理上限 | 默认 30 分钟；终止后等待 3 秒再强制杀进程组 |
+| 子代理限制 | 无扩展层 turn-count 限制；仅受 provider、上下文窗口及外部停止影响 |
 
 思考显示可用 `Ctrl+T` 或 `Alt+T` 切换。`models.json` 是为了覆盖模型目录中的上下文窗口；`pi.nix` 中默认模型附近的注释曾有过时表述，运行行为以 `settings.defaultModel` 为准。
 
-## 最重要的特色：权限闸门
+## 权限说明
 
-`extensions/permission-gate.ts` 提供三档运行时策略，可通过 `/permission allow`、`/permission ask`、`/permission deny` 切换；不带参数时会打开选择器：
-
-- `allow`：所有工具直接放行；
-- `ask`（默认）：`read`、网络只读工具，以及 `TaskList`、`TaskGet`、`TaskOutput` 直接放行；`TaskCreate`、`TaskUpdate`、`TaskStop`、`TaskExecute`、`Agent`、`SubagentWorkflow`、`get_subagent_result`、`steer_subagent` 和三个 goal 工具也直接放行；
-- `ask` 的其余工具：`ls`、`find`、`grep`、`bash`、`powershell`、`write`、`edit`、`ask_user_question` 以及任何未知/新增工具询问用户；无 UI 时无法询问的工具直接拦截；
-- `deny`：所有工具直接拦截。配置中没有静态 deny 规则，`deny` 仅是运行时模式；
-- 交互式对话框提供 **Yes / No / Always allow**，`Always allow` 只对当前工具且只持续到当前会话切换。
-
-`CC_PERMISSION_MODE=yolo` 是给 `cc-connect` 自动任务使用的明确入口：它让 Pi 以 `allow` 模式启动；运行中仍可用 `/permission ask` 或 `/permission deny` 覆盖本次 Pi 进程的模式。新增工具默认落入“需要询问”的一侧，降低扩展升级后意外获得写入/执行权限的风险。
+本配置不部署自定义 `permission-gate.ts`；工具权限遵循 Pi 本身、运行环境及各扩展的既有策略。不要在 Home Manager 激活时重新添加该文件。
 
 ## 子代理编排与可视化
 
-`extensions/subagent/` 把一次子代理调用启动为独立的 Pi 进程（JSON 模式、无 session 文件），只把结构化结果回传主会话，并且禁止子代理递归创建更多子代理。
+`extensions/pi-subagents/` 是由 Home Manager 声明式部署的本地 fork，入口为 `index.ts`。它保留原插件的 agent 类型、worktree、workflow、调度、FleetView、transcript 等能力，但顶层 `Agent` 只有后台模式：调用立即返回 ID，子代理完成后将最终 assistant 总结作为 OpenCode 风格的 `task_result` 自动通知插入主会话；`.output` JSONL 仅保留给 UI/调试，不会暴露给主模型；不再注册 `get_subagent_result`。
 
-支持三种模式：
-
-| 模式 | 用途 |
-| --- | --- |
-| single | 将一个明确任务交给 `general` 或 `explore` 等 agent。 |
-| parallel | 同时处理独立任务，最多 8 项，最多 4 个并发进程。 |
-| chain | 顺序执行多个 agent，下一步任务可用 `{previous}` 接收上一步最终输出。 |
-
-agent 从 `~/.pi/agent/agents/*.md` 读取；也可按 `agentScope` 使用当前项目最近的 `.pi/agents`。执行项目 agent 时默认再次确认，因为它们由仓库控制；无 UI 的 JSON/自动化运行会拒绝项目 agent，只有显式传入 `confirmProjectAgents: false` 才会继续。同名项目 agent 会覆盖用户 agent。内置配置中：
-
-- `general`：模仿 OpenCode 的通用执行 agent，暴露 `read`、`grep`、`find`、`ls`、`write`、`edit`、`bash` 以及 `web_search`、`fetch_content`、`get_search_content`、`source_check`；不暴露 `subagent`，因此不能递归派生子代理；
-- `explore`：只读的快速代码库搜索/定位 agent，只暴露 `read`、`grep`、`find`、`ls`。
-
-子代理是 JSON/无 UI 进程：主会话里的 `bash`、`write`、`edit` 仍按原 gate 询问；子代理只有 frontmatter 显式声明的工具会由 launcher 同时放入 Pi 的 `--tools` allowlist，并由 gate 作为该 agent 的权限 profile 放行。未声明的工具既不可见也不会被静默批准。子进程中的每个工具结果限制为 32 KiB，送入模型的工具结果总量限制为 512 KiB，避免一次大规模 grep/find/web 页面拖垮子代理上下文。子代理的 `cwd` 默认必须位于父 `cwd` 内；访问外部目录需要显式 `allowExternalCwd: true`。每个子代理都有硬超时，超时或取消时先对整个进程组发送 SIGTERM，宽限后发送 SIGKILL，并回收残留管道；可恢复的工具错误作为 warnings/diagnostics 保留并回传，只有进程、provider、超时或无最终输出等致命错误才让任务失败。保存到主会话的 transcript 限制为每项 256 KiB，最终输出限制为 64 KiB。上述限制是进程内 gate，不是 OS 沙箱；`bash` 仍应只执行任务所需的安全命令。
-
-受限的运行记录保存在主会话 tool result 中。`Alt+S` 或 `/subagents` 打开全屏查看器，可循环浏览每个子代理的任务、思考、工具调用、结果、诊断、模型和用量；若超过上限，查看器会明确显示 transcript 已截断。`Esc`/`q` 退出，方向键和 PgUp/PgDn 滚动。
+内置 `Explore` 不固定 Haiku，而是继承主会话模型；`pi.nix` 的 activation 会清理旧 npm 副本，避免已编译的旧 Haiku pin 再次被发现。
 
 ## Todo：分支正确的任务状态
 
@@ -70,7 +47,7 @@ Pi 0.84.4 已原生提供全屏模式的鼠标选择、滚轮、双击单词选�
 
 ## 网络与浏览器数据边界
 
-`pi.nix` 安装 `pi-web-access`，并写入 `~/.pi/web-search.json`：
+`pi.nix` 安装 `pi-web-access`，并写入 `~/.pi/agent/web-search.json`：
 
 - 仅额外允许本机 Clash/Mihomo fake-IP 使用的 `198.18.0.0/15`，不会因此放行 localhost、私网或字面 IP；
 - `allowBrowserCookies = false` 默认关闭；只有明确需要 Gemini Web 的 Chromium cookie 提取时才应手动打开。
@@ -83,18 +60,18 @@ Home Manager 将配置写入以下位置：
 
 ```text
 ~/.pi/agent/AGENTS.md             # agent-context.md
-~/.pi/agent/extensions/           # 权限、侧栏、Todo、子代理等扩展
+~/.pi/agent/extensions/           # 侧栏、Todo、子代理等扩展
 ~/.pi/agent/agents/               # general.md、explore.md
 ~/.pi/agent/skills/               # 本地与外部技能
 ~/.pi/agent/models.json
 ~/.pi/agent/keybindings.json
-~/.pi/web-search.json
+~/.pi/agent/web-search.json
 ```
 
 技能来源包括本地 `agent/skills`、Anthropic 的 docx/pptx/xlsx/pdf/canvas-design、`media-processor` 和 `idea-refine`。`superpowers` 在此配置中目前未启用（对应注释保留在 `pi.nix`）。
 
 ## 维护提示
 
-修改 `pi.nix` 的 overlay patch、Pi 版本或扩展 API 后，应优先检查：补丁是否无 fuzz 应用、扩展是否只使用当前版本的公共 API、权限闸门是否仍覆盖新增工具、子代理的进程组终止是否仍能清理孙进程，以及模型目录是否继续提供 1,050,000 上下文。
+修改 `pi.nix` 的 overlay patch、Pi 版本或扩展 API 后，应优先检查：补丁是否无 fuzz 应用、扩展是否只使用当前版本的公共 API、子代理的进程组终止是否仍能清理孙进程，以及模型目录是否继续提供 1,050,000 上下文。
 
 `skills.nix` 的外部技能已经固定 revision 和 hash；更新时应同时重新验证内容与 hash。扩展源码由 Home Manager 以声明式文件方式部署，不建议直接修改 `~/.pi/agent/` 下的生成文件。

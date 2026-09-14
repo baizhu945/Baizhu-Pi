@@ -1,4 +1,4 @@
-{ config, pkgs, lib, ... }:
+{ pkgs, ... }:
 
 {
   # 0.84.4 已原生提供选择、滚轮和复制逻辑；这里只保留启动界面的大号 logo
@@ -12,17 +12,9 @@
   ];
 
   imports = [
+    ./subagents.nix
     ./skills.nix
-    ../cc-connect.nix
   ];
-
-  # subagent 硬上限：防止模型、网络或遗留子进程让主任务无限等待。
-  # 扩展内置上限为 2 小时，这里显式固定为 30 分钟；终止时先 SIGTERM，
-  # 等待 3 秒后 SIGKILL 并回收整个进程组。
-  home.sessionVariables = {
-    PI_SUBAGENT_TIMEOUT_MS = "1800000";
-    PI_SUBAGENT_KILL_GRACE_MS = "3000";
-  };
 
   programs.pi-coding-agent = {
     enable = true;
@@ -53,8 +45,8 @@
         "npm:@juicesharp/rpiv-ask-user-question"
         "npm:pi-web-access"
         "npm:@narumitw/pi-goal"
+        "npm:@narumitw/pi-plan-mode"
         "npm:@tintinweb/pi-tasks"
-        "npm:@tintinweb/pi-subagents"
 
         # "git:github.com/obra/superpowers"
       ];
@@ -62,14 +54,14 @@
   };
 
   # skills：pi 的全局技能根是 ~/.pi/agent/skills/，逐个软链（reasonix.nix 同款做法）
-  # 权限 gate：~/.pi/agent/extensions/ 下的 .ts 会被 pi 自动发现并加载
   home.file = {
-    # pi-web-access 配置：本机 Clash/Mihomo TUN 代理把公网域名解析成 198.18.0.0/15
-    # 的 fake-IP，导致包内 SSRF DNS 预检拦截所有抓取。仅放行该代理合成网段
+    # pi-web-access 0.29+ 默认从 Pi 的 agent 配置目录读取此文件。本机
+    # Clash/Mihomo TUN 代理把公网域名解析成 198.18.0.0/15 的 fake-IP，
+    # 导致包内 SSRF DNS 预检拦截所有抓取。仅放行该代理合成网段
     # （私网/localhost/字面 IP 仍被拦截，安全语义不变）。
     # allowBrowserCookies：启用 Gemini Web 的 Chromium cookie 提取；默认关闭，
     # 避免子代理/网络扩展读取浏览器会话数据。需要时再显式改为 true。
-    ".pi/web-search.json".text = ''
+    ".pi/agent/web-search.json".text = ''
       {
         "ssrf": {
           "allowRanges": ["198.18.0.0/15"]
@@ -78,7 +70,7 @@
       }
     '';
 
-    ".pi/agent/extensions/" = {
+    ".pi/agent/extensions" = {
       source = ./extensions;
       recursive = true;
     };
@@ -88,14 +80,4 @@
 
     ".pi/agent/models.json".source = ./models.json;
   };
-
-  # pi-subagents 默认给 Explore 指定 Haiku；移除该行，使其使用 inherit 模型配置。
-  home.activation.piSubagentsExploreModel = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
-    target="/home/baizhu945/.pi/agent/npm/node_modules/@tintinweb/pi-subagents/src/default-agents.ts"
-    if [ -f "$target" ]; then
-      run ${pkgs.gnused}/bin/sed -i \
-        '/^[[:space:]]*"Explore",[[:space:]]*$/,/^[[:space:]]*],[[:space:]]*$/ { /^[[:space:]]*model: "anthropic\/claude-haiku-4-5",[[:space:]]*$/d; }' \
-        "$target"
-    fi
-  '';
 }

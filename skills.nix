@@ -3,17 +3,17 @@
 let
   anbeime-skills-repo = builtins.fetchGit {
     url = "https://github.com/anbeime/skill.git";
-    ref = "main";
+    rev = "afaf2ce2de5b678bf741242229c34dd7b3968900";
   };
 
   anthropics-skills-repo = builtins.fetchGit {
     url = "https://github.com/anthropics/skills.git";
-    ref = "main";
+    rev = "34040c9c568585f6929bedeaad110ad08f079624";
   };
 
   agent-skills-repo = builtins.fetchGit {
     url = "https://github.com/addyosmani/agent-skills.git";
-    ref = "main";
+    rev = "be4e44a9fbc5e8df0beaefadbb28bd22ee61cc39";
   };
 in
 {
