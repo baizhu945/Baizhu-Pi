@@ -5,7 +5,7 @@
  * Subscribes to session events for real-time streaming updates.
  */
 
-import { type AgentSession, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, type AgentSessionEvent, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { type Component, Input, Markdown, type MarkdownOptions, type MarkdownTheme, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { renderAgentName } from "../agent-color.js";
 import { extractText } from "../context.js";
@@ -42,6 +42,30 @@ const MARKDOWN_MODE_LABELS: Record<ViewerMarkdownMode, string> = {
   off: "raw",
   assistant: "md",
   all: "md+",
+};
+
+/**
+ * Streaming output does not need to repaint at terminal speed. More importantly,
+ * a repaint is expensive because pi renders the main screen before compositing
+ * the overlay. Coalescing provider deltas here keeps a fast stream from turning
+ * every token into a full root-layout pass while keeping the viewer live.
+ */
+const VIEWER_REFRESH_MS = 50;
+/** Keep duration/activity text alive during a long tool call with no deltas. */
+const VIEWER_HEARTBEAT_MS = 250;
+
+type CachedMessageLines = {
+  width: number;
+  mode: ViewerMarkdownMode;
+  lines: string[];
+  hasContent: boolean;
+};
+
+type CachedContentLines = {
+  width: number;
+  mode: ViewerMarkdownMode;
+  revision: number;
+  lines: string[];
 };
 
 /**
@@ -141,8 +165,17 @@ export class ConversationViewer implements Component {
   private scrollOffset = 0;
   private autoScroll = true;
   private unsubscribe: (() => void) | undefined;
+  private refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private lastInnerW = 0;
   private closed = false;
+  /** Bumped only when data visible in the viewer changes. */
+  private contentRevision = 0;
+  private contentCache: CachedContentLines | undefined;
+  /** Streaming mutates the current message object in place; mark it dirty by event. */
+  private dirtyMessages = new WeakSet<object>();
+  /** Raw wrapping is as expensive as Markdown for large tool output, so cache it too. */
+  private messageCache = new WeakMap<object, CachedMessageLines>();
   /** Two-press confirm guard for the stop key, so a stray key can't kill the agent. */
   private stopArmed = false;
   private keys: ViewerKeys;
@@ -158,7 +191,7 @@ export class ConversationViewer implements Component {
    * keystroke — the component caches, but only across calls to the same object.
    * Weak so a compacted-away message doesn't pin its render.
    */
-  private readonly markdownCache = new WeakMap<object, { md: Markdown; text: string; failed?: boolean }>();
+  private markdownCache = new WeakMap<object, { md: Markdown; text: string; failed?: boolean }>();
 
   constructor(
     private tui: TUI,
@@ -193,10 +226,70 @@ export class ConversationViewer implements Component {
   ) {
     this.markdownTheme = resolveMarkdownTheme(theme);
     this.keys = createViewerKeys(keybindings);
-    this.unsubscribe = session.subscribe(() => {
-      if (this.closed) return;
-      this.tui.requestRender();
+    this.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+      if (this.closed || !this.markEventVisible(event)) return;
+      const message = (event as { message?: unknown }).message;
+      if (message && typeof message === "object") {
+        this.dirtyMessages.add(message);
+      } else if (event.type === "bash_execution_update") {
+        // Bash output is a mutable custom message and its update event carries
+        // only the delta. The last bash message is the one whose cached lines
+        // must be rebuilt.
+        const last = this.session.messages[this.session.messages.length - 1];
+        if (last && (last as { role?: string }).role === "bashExecution") {
+          this.dirtyMessages.add(last as object);
+        }
+      }
+      this.contentRevision++;
+      this.scheduleRefresh();
     });
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.closed && (this.record.status === "running" || this.record.status === "queued")) {
+        this.scheduleRefresh();
+      }
+    }, VIEWER_HEARTBEAT_MS);
+  }
+
+  /**
+   * Ignore provider events that cannot change this viewer. In particular,
+   * thinking deltas are not rendered here, so they must not cause a full overlay
+   * repaint while the model is producing a long chain of thought.
+   */
+  private markEventVisible(event: AgentSessionEvent): boolean {
+    switch (event.type) {
+      case "message_start":
+      case "message_end":
+      case "tool_execution_start":
+      case "tool_execution_end":
+      case "bash_execution_update":
+      case "agent_end":
+      case "agent_settled":
+      case "queue_update":
+      case "compaction_start":
+      case "compaction_end":
+        return true;
+      case "message_update":
+        return event.assistantMessageEvent.type === "start"
+          || event.assistantMessageEvent.type === "text_start"
+          || event.assistantMessageEvent.type === "text_delta"
+          || event.assistantMessageEvent.type === "text_end"
+          || event.assistantMessageEvent.type === "toolcall_start"
+          || event.assistantMessageEvent.type === "toolcall_delta"
+          || event.assistantMessageEvent.type === "toolcall_end"
+          || event.assistantMessageEvent.type === "done"
+          || event.assistantMessageEvent.type === "error";
+      default:
+        return false;
+    }
+  }
+
+  /** Coalesce a burst of provider events into at most one viewer repaint. */
+  private scheduleRefresh(): void {
+    if (this.refreshTimer !== undefined) return;
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = undefined;
+      if (!this.closed) this.tui.requestRender();
+    }, VIEWER_REFRESH_MS);
   }
 
   handleInput(data: string): void {
@@ -471,10 +564,26 @@ export class ConversationViewer implements Component {
     this.tui.requestRender();
   }
 
-  invalidate(): void { /* no cached state to clear */ }
+  invalidate(): void {
+    // Theme/terminal invalidation must not reuse ANSI strings styled for the
+    // previous frame. WeakMap has no clear(), so replace the maps as a whole.
+    this.contentRevision++;
+    this.contentCache = undefined;
+    this.messageCache = new WeakMap();
+    this.markdownCache = new WeakMap();
+    this.dirtyMessages = new WeakSet();
+  }
 
   dispose(): void {
     this.closed = true;
+    if (this.refreshTimer !== undefined) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
+    if (this.heartbeatTimer !== undefined) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
     if (this.unsubscribe) {
       this.unsubscribe();
       this.unsubscribe = undefined;
@@ -506,9 +615,108 @@ export class ConversationViewer implements Component {
     return this.theme.fg("dim", `  ↳ ${parts.join(" · ")}`);
   }
 
+  /** Render one transcript message once per width/mode until its event dirties it. */
+  private renderMessage(
+    msg: AgentSession["messages"][number],
+    width: number,
+    mode: ViewerMarkdownMode,
+  ): CachedMessageLines {
+    const key = msg as object;
+    const cached = this.messageCache.get(key);
+    if (cached && !this.dirtyMessages.has(key) && cached.width === width && cached.mode === mode) {
+      return cached;
+    }
+
+    const th = this.theme;
+    const finish = (lines: string[], hasContent: boolean): CachedMessageLines => {
+      const result = {
+        width,
+        mode,
+        // The final frame pass truncates the assembled lines once. Keeping the
+        // per-message cache unmodified avoids scanning every line twice on a
+        // cold render while still preserving the old output boundary.
+        lines,
+        hasContent,
+      };
+      this.messageCache.set(key, result);
+      this.dirtyMessages.delete(key);
+      return result;
+    };
+
+    if (msg.role === "user") {
+      const text = typeof msg.content === "string"
+        ? msg.content
+        : extractText(msg.content);
+      if (!text.trim()) return finish([], false);
+      return finish([
+        th.fg("accent", "[User]"),
+        ...wrapTextWithAnsi(text.trim(), width),
+      ], true);
+    }
+
+    if (msg.role === "assistant") {
+      const lines: string[] = [th.bold("[Assistant]")];
+      const textParts: string[] = [];
+      const toolCalls: string[] = [];
+      for (const c of msg.content) {
+        if (c.type === "text" && c.text) textParts.push(c.text);
+        else if (c.type === "toolCall") {
+          toolCalls.push((c as any).name ?? (c as any).toolName ?? "unknown");
+        }
+      }
+      if (textParts.length > 0) {
+        const text = textParts.join("\n").trim();
+        lines.push(...(mode === "off"
+          ? this.rawLines(text, width, false)
+          : this.markdownLines(msg, text, width, false)));
+      }
+      for (const name of toolCalls) {
+        lines.push(th.fg("muted", `  [Tool: ${name}]`));
+      }
+      return finish(lines, true);
+    }
+
+    if (msg.role === "toolResult") {
+      const { text, elided } = capResult(extractText(msg.content).trim());
+      if (!text) return finish([], false);
+      const lines: string[] = [th.fg("dim", "[Result]")];
+      lines.push(...(mode === "all"
+        ? this.markdownLines(msg, text, width, true)
+        : this.rawLines(text, width, true)));
+      if (elided) lines.push(th.fg("dim", truncationNote(elided)));
+      return finish(lines, true);
+    }
+
+    if ((msg as any).role === "bashExecution") {
+      const bash = msg as any;
+      const lines: string[] = [th.fg("muted", `  $ ${bash.command}`)];
+      if (bash.output?.trim()) {
+        // Same cap as a tool result, never Markdown: command output is the one
+        // thing here that is definitionally not authored as Markdown.
+        const { text, elided } = capResult(bash.output.trim());
+        lines.push(...this.rawLines(text, width, true));
+        if (elided) lines.push(th.fg("dim", truncationNote(elided)));
+      }
+      return finish(lines, true);
+    }
+
+    return finish([], false);
+  }
+
+  /** Return a cached full frame until a visible session event changes it. */
   private buildContentLines(width: number): string[] {
     if (width <= 0) return [];
+    const mode = this.markdownMode();
+    const cached = this.contentCache;
+    if (cached && cached.width === width && cached.mode === mode && cached.revision === this.contentRevision) {
+      return cached.lines;
+    }
+    const lines = this.buildContentLinesUncached(width, mode);
+    this.contentCache = { width, mode, revision: this.contentRevision, lines };
+    return lines;
+  }
 
+  private buildContentLinesUncached(width: number, mode: ViewerMarkdownMode): string[] {
     const th = this.theme;
     const messages = this.session.messages;
     const lines: string[] = [];
@@ -518,62 +726,12 @@ export class ConversationViewer implements Component {
       return lines;
     }
 
-    const mode = this.markdownMode();
     let needsSeparator = false;
     for (const msg of messages) {
-      if (msg.role === "user") {
-        const text = typeof msg.content === "string"
-          ? msg.content
-          : extractText(msg.content);
-        if (!text.trim()) continue;
-        if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(th.fg("accent", "[User]"));
-        for (const line of wrapTextWithAnsi(text.trim(), width)) {
-          lines.push(line);
-        }
-      } else if (msg.role === "assistant") {
-        const textParts: string[] = [];
-        const toolCalls: string[] = [];
-        for (const c of msg.content) {
-          if (c.type === "text" && c.text) textParts.push(c.text);
-          else if (c.type === "toolCall") {
-            toolCalls.push((c as any).name ?? (c as any).toolName ?? "unknown");
-          }
-        }
-        if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(th.bold("[Assistant]"));
-        if (textParts.length > 0) {
-          const text = textParts.join("\n").trim();
-          lines.push(...(mode === "off"
-            ? this.rawLines(text, width, false)
-            : this.markdownLines(msg, text, width, false)));
-        }
-        for (const name of toolCalls) {
-          lines.push(truncateToWidth(th.fg("muted", `  [Tool: ${name}]`), width));
-        }
-      } else if (msg.role === "toolResult") {
-        const { text, elided } = capResult(extractText(msg.content).trim());
-        if (!text) continue;
-        if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(th.fg("dim", "[Result]"));
-        lines.push(...(mode === "all"
-          ? this.markdownLines(msg, text, width, true)
-          : this.rawLines(text, width, true)));
-        if (elided) lines.push(truncateToWidth(th.fg("dim", truncationNote(elided)), width));
-      } else if ((msg as any).role === "bashExecution") {
-        const bash = msg as any;
-        if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(truncateToWidth(th.fg("muted", `  $ ${bash.command}`), width));
-        if (bash.output?.trim()) {
-          // Same cap as a tool result, never Markdown: command output is the one
-          // thing here that is definitionally not authored as Markdown.
-          const { text, elided } = capResult(bash.output.trim());
-          lines.push(...this.rawLines(text, width, true));
-          if (elided) lines.push(truncateToWidth(th.fg("dim", truncationNote(elided)), width));
-        }
-      } else {
-        continue;
-      }
+      const rendered = this.renderMessage(msg, width, mode);
+      if (!rendered.hasContent) continue;
+      if (needsSeparator) lines.push(th.fg("dim", "───"));
+      lines.push(...rendered.lines);
       needsSeparator = true;
     }
 
@@ -581,9 +739,9 @@ export class ConversationViewer implements Component {
     if (this.record.status === "running" && this.activity) {
       const act = describeActivity(this.activity.activeTools, this.activity.responseText);
       lines.push("");
-      lines.push(truncateToWidth(th.fg("accent", "▍ ") + th.fg("dim", act), width));
+      lines.push(th.fg("accent", "▍ ") + th.fg("dim", act));
     }
 
-    return lines.map(l => truncateToWidth(l, width));
+    return lines.map(line => truncateToWidth(line, width));
   }
 }

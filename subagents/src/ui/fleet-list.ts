@@ -198,6 +198,10 @@ export class FleetList {
   /** Re-register/refresh the below-editor widget; clears it when nothing remains. */
   update(): void {
     if (!this.ui) return;
+    // The fleet list is behind the same modal/preview overlays as the agent
+    // widget. Do not let its 200 ms clock repaint the hidden root tree; the
+    // first update after the overlay closes catches up with the roster.
+    if (this.tui?.hasOverlay?.() === true) return;
     // A run with no agents of its own left in the list is still worth a row —
     // it is the thing the user opens to see what its children did. Read off the
     // roster for the same reason activation does: two counts of "is there

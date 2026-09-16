@@ -433,12 +433,24 @@ export default function (pi: ExtensionAPI) {
   const pendingUsage = new PendingUsagePool();
 
   // ---- Cancellable pending notifications ----
-  // Completion notifications must reach the parent as soon as the child run
-  // settles. Keep a zero-delay timer only as an event-loop boundary: it lets an
-  // external RPC consumer mark a result consumed in the same turn, without
-  // imposing the old 200 ms hold on the model-facing notification.
+  // Group/workflow notifications still use the generic cancellable timer below.
+  // Independent completions use the batch queue that follows: it keeps a short
+  // collection window, then flushes synchronously at a root tool boundary.
   const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
   const NUDGE_HOLD_MS = 0;
+  /**
+   * A parent session defaults to one-at-a-time steering. Keep completed
+   * top-level agents in this short queue and send one custom message containing
+   * all of them, otherwise eight near-simultaneous completions become eight
+   * parent turns. The window is only a delivery debounce, not a result timeout.
+   */
+  const COMPLETION_BATCH_WINDOW_MS = 100;
+  const pendingCompletionRecords = new Map<string, AgentRecord>();
+  let completionWindowTimer: ReturnType<typeof setTimeout> | undefined;
+  let completionDispatchTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Number of root-session tool calls currently executing. */
+  let parentToolCalls = 0;
+
   function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
     cancelNudge(key);
     pendingNudges.set(key, setTimeout(() => {
@@ -453,9 +465,22 @@ export default function (pi: ExtensionAPI) {
       clearTimeout(timer);
       pendingNudges.delete(key);
     }
+    // RPC consumers can consume a result during the debounce window. Remove
+    // it from the batch as well, otherwise the automatic notification would
+    // still report a result the caller explicitly claimed.
+    if (pendingCompletionRecords.delete(key) && pendingCompletionRecords.size === 0) {
+      if (completionWindowTimer !== undefined) {
+        clearTimeout(completionWindowTimer);
+        completionWindowTimer = undefined;
+      }
+      if (completionDispatchTimer !== undefined) {
+        clearTimeout(completionDispatchTimer);
+        completionDispatchTimer = undefined;
+      }
+    }
   }
 
-  // ---- Individual nudge helper (async join mode) ----
+  // ---- Completion notification delivery ----
   function emitIndividualNudge(record: AgentRecord) {
     if (record.resultConsumed) return;  // re-check at send time
 
@@ -472,11 +497,83 @@ export default function (pi: ExtensionAPI) {
     }, { deliverAs: "steer", triggerTurn: true });
   }
 
+  function emitCompletionBatch(records: AgentRecord[]) {
+    const unconsumed = records.filter(record => !record.resultConsumed);
+    if (unconsumed.length === 0) return;
+    if (unconsumed.length === 1) {
+      emitIndividualNudge(unconsumed[0]);
+      return;
+    }
+
+    const notifications = unconsumed.map(record => formatTaskNotification(record, showCost)).join("\n\n");
+    const [first, ...rest] = unconsumed;
+    const details = buildNotificationDetails(first, 500);
+    if (rest.length > 0) {
+      details.others = rest.map(record => buildNotificationDetails(record, 300));
+    }
+
+    pi.sendMessage<NotificationDetails>({
+      customType: "subagent-notification",
+      content: `Background agent group completed: ${unconsumed.length} agents finished\n\n${notifications}`,
+      display: true,
+      details,
+    }, { deliverAs: "steer", triggerTurn: true });
+  }
+
+  function flushCompletionBatch(immediate = false) {
+    if (immediate && completionWindowTimer !== undefined) {
+      clearTimeout(completionWindowTimer);
+      completionWindowTimer = undefined;
+    } else if (!immediate) {
+      completionWindowTimer = undefined;
+    }
+    if (immediate && completionDispatchTimer !== undefined) {
+      clearTimeout(completionDispatchTimer);
+      completionDispatchTimer = undefined;
+    }
+    if (pendingCompletionRecords.size === 0) return;
+
+    if (immediate) {
+      // A root tool is just returning, so inject before AgentSession polls its
+      // steering queue. This makes one tool call observe every result that
+      // piled up during that call, rather than requiring a follow-up turn.
+      const records = [...pendingCompletionRecords.values()];
+      pendingCompletionRecords.clear();
+      emitCompletionBatch(records);
+      return;
+    }
+
+    // Keep the map populated until the dispatch boundary so an RPC consumer
+    // can still remove an individual result during the short debounce window.
+    if (completionDispatchTimer !== undefined) return;
+    completionDispatchTimer = setTimeout(() => {
+      completionDispatchTimer = undefined;
+      const records = [...pendingCompletionRecords.values()];
+      pendingCompletionRecords.clear();
+      emitCompletionBatch(records);
+    }, 0);
+  }
+
+  function queueCompletionNudge(record: AgentRecord) {
+    if (record.resultConsumed) return;
+    pendingCompletionRecords.set(record.id, record);
+    // While the parent is inside a tool call it cannot consume steering input
+    // yet. Hold the records until that tool finishes so every completion that
+    // piled up during the call becomes one steering message. Idle parents still
+    // use the short debounce to catch completions arriving in the same burst.
+    if (parentToolCalls > 0) return;
+    if (completionWindowTimer === undefined && completionDispatchTimer === undefined) {
+      completionWindowTimer = setTimeout(flushCompletionBatch, COMPLETION_BATCH_WINDOW_MS);
+    }
+  }
+
+  // Queue an otherwise-independent completion; the dispatcher coalesces nearby
+  // records into one steer message before the parent can drain its queue.
   function sendIndividualNudge(record: AgentRecord) {
     agentActivity.delete(record.id);
     widget.markFinished(record.id);
     fleet.onAgentFinished(record.id);
-    scheduleNudge(record.id, () => emitIndividualNudge(record));
+    queueCompletionNudge(record);
     widget.update();
   }
 
@@ -1133,6 +1230,11 @@ export default function (pi: ExtensionAPI) {
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
+    if (completionWindowTimer !== undefined) clearTimeout(completionWindowTimer);
+    if (completionDispatchTimer !== undefined) clearTimeout(completionDispatchTimer);
+    completionWindowTimer = undefined;
+    completionDispatchTimer = undefined;
+    pendingCompletionRecords.clear();
     fleet.dispose();
     // Awaited: it emits `session_shutdown` into every retained child session so
     // extensions bound there can release what they armed in `session_start` (#242).
@@ -1395,9 +1497,27 @@ export default function (pi: ExtensionAPI) {
 
   // Grab UI context from first tool execution + clear lingering widget on new turn
   pi.on("tool_execution_start", async (_event, ctx) => {
+    // A completion that arrived while an earlier result-producing tool was
+    // running must stay with that tool's batch. Cancel the idle debounce here;
+    // the matching tool_execution_end will flush everything accumulated so far.
+    if (parentToolCalls === 0 && completionWindowTimer !== undefined) {
+      clearTimeout(completionWindowTimer);
+      completionWindowTimer = undefined;
+    }
+    parentToolCalls++;
     widget.setUICtx(ctx.ui as UICtx);
     fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
     widget.onTurnStart();
+  });
+
+  pi.on("tool_execution_end", () => {
+    parentToolCalls = Math.max(0, parentToolCalls - 1);
+    // The parent cannot drain steering messages until this tool result returns.
+    // Flush at the boundary rather than allowing the first completion to start
+    // a one-at-a-time steering chain before sibling completions are observed.
+    if (parentToolCalls === 0 && pendingCompletionRecords.size > 0) {
+      flushCompletionBatch(true);
+    }
   });
 
   /** Build the full type list text dynamically from available agents only. */

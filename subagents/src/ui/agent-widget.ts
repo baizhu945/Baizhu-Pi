@@ -569,6 +569,10 @@ export class AgentWidget {
   /** Force an immediate widget update. */
   update() {
     if (!this.uiCtx) return;
+    // The widget is behind modal/preview overlays. Updating it at 80 ms while
+    // hidden only schedules another full root-layout render; the next tick after
+    // the overlay closes will reconcile all current state.
+    if (this.tui?.hasOverlay?.() === true) return;
     const allAgents = this.widgetAgents();
 
     // Lightweight existence checks — full categorization happens in renderWidget()
