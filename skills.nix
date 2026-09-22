@@ -1,19 +1,11 @@
 { config, pkgs, lib, ... }:
 
 let
-  anbeime-skills-repo = builtins.fetchGit {
-    url = "https://github.com/anbeime/skill.git";
-    rev = "afaf2ce2de5b678bf741242229c34dd7b3968900";
-  };
-
-  anthropics-skills-repo = builtins.fetchGit {
-    url = "https://github.com/anthropics/skills.git";
+  anthropics-skills-repo = pkgs.fetchFromGitHub {
+    owner = "anthropics";
+    repo = "skills";
     rev = "34040c9c568585f6929bedeaad110ad08f079624";
-  };
-
-  agent-skills-repo = builtins.fetchGit {
-    url = "https://github.com/addyosmani/agent-skills.git";
-    rev = "be4e44a9fbc5e8df0beaefadbb28bd22ee61cc39";
+    hash = "sha256-tI4bTTBfI1ylltklGyiyA7pLoKXEWtrT6lrmwrpLbCw=";
   };
 in
 {

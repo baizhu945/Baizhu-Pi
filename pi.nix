@@ -45,10 +45,7 @@
         "npm:@juicesharp/rpiv-ask-user-question"
         "npm:pi-web-access"
         "npm:@narumitw/pi-goal"
-        "npm:@narumitw/pi-plan-mode"
         "npm:@tintinweb/pi-tasks"
-
-        # "git:github.com/obra/superpowers"
       ];
     };
   };
