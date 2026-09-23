@@ -32,7 +32,7 @@
 
       # （defaultProvider 必须与 defaultModel 一起设置，模型解析器两者都需要）
       defaultProvider = "openai-codex";
-      defaultModel = "gpt-5.6-luna";
+      defaultModel = "gpt-6-luna";
       defaultThinkingLevel = "xhigh";
 
       # 思维链默认展开（false = 不隐藏 thinking 块）；ctrl+t / alt+t 可随时折叠/展开
