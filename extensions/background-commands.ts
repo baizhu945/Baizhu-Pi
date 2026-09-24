@@ -26,11 +26,13 @@ type Job = {
   error?: string;
   outputBytes: number;
   output: Buffer;
+  autoDeliver: boolean;
   killTimer?: NodeJS.Timeout;
 };
 
 export default function (pi: ExtensionAPI) {
   const jobs = new Map<string, Job>();
+  let shuttingDown = false;
   let widgetUi: ExtensionContext["ui"] | undefined;
   let widgetTui: { terminal: { columns: number }; requestRender(): void } | undefined;
   let widgetRegistered = false;
@@ -42,15 +44,12 @@ export default function (pi: ExtensionAPI) {
     const active = activeJobs();
     if (!active.length || !widgetTui) return [];
     const width = Math.max(1, widgetTui.terminal.columns);
-    const lines = [truncateToWidth(theme.fg("accent", `Background (${active.length} active)`), width)];
+    const lines = [truncateToWidth(theme.fg("accent", "Background"), width)];
     const shown = active.slice(-MAX_WIDGET_JOBS);
-    const hidden = active.length - shown.length;
-    if (hidden) lines.push(truncateToWidth(theme.fg("dim", `  … ${hidden} more; /jobs lists all`), width));
     for (const job of shown) {
-      const marker = job.state === "stopping" ? "◌" : "●";
-      const prefix = `  ${marker} ${job.id} $ `;
+      const prefix = `  ${job.id}  `;
       const seconds = Math.floor((Date.now() - job.startedAt) / 1000);
-      const suffix = ` (${seconds}s)`;
+      const suffix = `  ${seconds}s`;
       const command = stripTerminalSequences(job.command).replace(/\s+/g, " ").trim();
       const space = Math.max(1, width - visibleWidth(prefix) - visibleWidth(suffix));
       lines.push(truncateToWidth(prefix + truncateToWidth(command, space) + theme.fg("dim", suffix), width));
@@ -72,7 +71,7 @@ export default function (pi: ExtensionAPI) {
       widgetUi.setWidget(WIDGET_KEY, (tui, theme) => {
         widgetTui = tui;
         return { render: () => renderWidget(theme), invalidate() {} };
-      }, { placement: "belowEditor" });
+      }, { placement: "aboveEditor" });
       widgetRegistered = true;
     } else {
       widgetTui?.requestRender();
@@ -81,6 +80,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", (_event, ctx) => {
+    shuttingDown = false;
     if (ctx.mode !== "tui") return;
     if (widgetRegistered) widgetUi?.setWidget(WIDGET_KEY, undefined);
     widgetUi = ctx.ui;
@@ -114,7 +114,7 @@ export default function (pi: ExtensionAPI) {
     }, 2000);
   }
 
-  function start(command: string, name: string | undefined, cwd: string): Job {
+  function start(command: string, name: string | undefined, cwd: string, autoDeliver = false): Job {
     if (!command.trim()) throw new Error("Command cannot be empty");
     if (jobs.size >= MAX_JOBS) {
       for (const [id, job] of jobs) {
@@ -133,7 +133,7 @@ export default function (pi: ExtensionAPI) {
     });
     const job: Job = {
       id, name: name?.trim() || command.slice(0, 80), command, cwd, child,
-      state: "running", startedAt: Date.now(), outputBytes: 0, output: Buffer.alloc(0),
+      state: "running", startedAt: Date.now(), outputBytes: 0, output: Buffer.alloc(0), autoDeliver,
     };
     jobs.set(id, job);
     child.stdout?.on("data", (chunk: Buffer) => append(job, chunk));
@@ -147,6 +147,20 @@ export default function (pi: ExtensionAPI) {
       job.signal = signal;
       job.endedAt = Date.now();
       updateWidget();
+      if (job.autoDeliver && job.state !== "stopped" && !shuttingDown) {
+        try {
+          pi.sendMessage({
+            customType: "background-command-result",
+            content: `Background command finished. Use this result to continue the user's task; no bg_status call is needed for its final output.\n\n${status(job.id, OUTPUT_BYTES)}`,
+            display: true,
+            details: { id: job.id, state: job.state, exitCode: job.exitCode, signal: job.signal },
+          }, { deliverAs: "steer", triggerTurn: true });
+        } catch (error) {
+          const message = `Could not deliver background result ${job.id}: ${String(error)}. Use bg_status ${job.id}.`;
+          if (widgetUi) widgetUi.notify(message, "error");
+          else console.error(message);
+        }
+      }
     });
     updateWidget();
     return job;
@@ -183,14 +197,14 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "bg_run",
     label: "Background command",
-    description: "Use for a long-running shell command when you need to continue other agent work while it runs, such as a build, test suite, watcher, or development server. Starts in the current working directory and returns a job ID immediately. Later call bg_status with that ID to read progress and confirm the exit code; call bg_kill if the job must stop. Starting a job does not mean it succeeded. Jobs are tracked only by this Pi process.",
+    description: "Use for a long-running shell command when you need to continue other agent work while it runs, such as a build, test suite, watcher, or development server. Starts in the current working directory and returns a job ID immediately. When the command exits on its own, its exit status and retained output are automatically sent to you as a new message, including if you are busy with other work; do not poll bg_status just to retrieve the final result. Use bg_status only for progress while it runs, and bg_kill if it must stop. Jobs are tracked only by this Pi process.",
     parameters: Type.Object({
       command: Type.String({ description: "Shell command to start in the current working directory" }),
       name: Type.Optional(Type.String({ description: "Optional short label shown in job listings" })),
     }),
     async execute(_id, params, _signal, _update, ctx) {
-      const job = start(params.command, params.name, ctx.cwd);
-      return result(`${description(job)}\nUse bg_status with id ${job.id} to check progress.`);
+      const job = start(params.command, params.name, ctx.cwd, true);
+      return result(`${description(job)}\nThe final result will arrive automatically. Use bg_status with id ${job.id} only to check progress while it runs.`);
     },
     renderCall(args, theme) {
       return new Text(`${theme.fg("toolTitle", "bg_run")}\n${theme.fg("dim", "$ ")}${args.command}`, 0, 0);
@@ -200,7 +214,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "bg_status",
     label: "Background status",
-    description: "Use after bg_run to check a job's progress while you continue other work, or to confirm its final result. With an ID, returns the state (running, stopping, exited, failed, or stopped), elapsed time, PID or exit code, and the recent combined stdout/stderr; it returns immediately without waiting for the job. Omit the ID to list tracked jobs. Output is a bounded tail, so earlier output may be omitted.",
+    description: "Use to inspect a background job's progress while it is still running, or to revisit a job's saved status. A bg_run job sends its final exit status and retained output to you automatically, so no status call is needed after completion. With an ID, returns state, elapsed time, PID or exit code, and recent combined stdout/stderr without waiting. Omit the ID to list tracked jobs. Output is a bounded tail, so earlier output may be omitted.",
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: "Job ID returned by bg_run; omit to list all tracked jobs" })),
       maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 8192, description: "Maximum recent output characters to show for one job (default 4000)" })),
@@ -256,6 +270,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    shuttingDown = true;
     if (widgetTimer) clearInterval(widgetTimer);
     widgetTimer = undefined;
     if (widgetRegistered) widgetUi?.setWidget(WIDGET_KEY, undefined);

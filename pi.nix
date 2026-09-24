@@ -1,16 +1,6 @@
 { pkgs, ... }:
 
 {
-  # 0.84.4 已原生提供选择、滚轮和复制逻辑；这里只保留启动界面的大号 logo
-  # 补丁。其余旧补丁依赖已经移除或已被上游实现的 TUI API。
-  nixpkgs.overlays = [
-    (final: prev: {
-      pi-coding-agent = prev.pi-coding-agent.overrideAttrs (old: {
-        patches = (old.patches or [ ]) ++ [ ./patches/startup-logo.patch ];
-      });
-    })
-  ];
-
   imports = [
     ./subagents.nix
     ./skills.nix
@@ -46,6 +36,8 @@
         "npm:pi-web-access"
         "npm:@narumitw/pi-goal"
         "npm:@tintinweb/pi-tasks"
+
+        "npm:pi-open-tui"
       ];
     };
   };
