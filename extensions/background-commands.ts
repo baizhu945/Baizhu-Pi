@@ -2,7 +2,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Box, stripTerminalSequences, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 const MAX_JOBS = 32;
@@ -10,6 +10,7 @@ const OUTPUT_BYTES = 64 * 1024;
 const DEFAULT_VIEW_CHARS = 4000;
 const MAX_WIDGET_JOBS = 6;
 const WIDGET_KEY = "background-commands";
+const COMPLETION_BATCH_MS = 250;
 
 type State = "running" | "stopping" | "exited" | "failed" | "stopped";
 type Job = {
@@ -29,10 +30,22 @@ type Job = {
   autoDeliver: boolean;
   killTimer?: NodeJS.Timeout;
 };
+type CompletionRow = {
+  id: string;
+  command: string;
+  state: State;
+  exitCode?: number | null;
+  signal?: string | null;
+  durationMs: number;
+};
+type CompletionDetails = { jobs: CompletionRow[] };
 
 export default function (pi: ExtensionAPI) {
   const jobs = new Map<string, Job>();
+  const pendingCompletions = new Map<string, Job>();
   let shuttingDown = false;
+  let activeToolCalls = 0;
+  let completionTimer: NodeJS.Timeout | undefined;
   let widgetUi: ExtensionContext["ui"] | undefined;
   let widgetTui: { terminal: { columns: number }; requestRender(): void } | undefined;
   let widgetRegistered = false;
@@ -81,12 +94,91 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx) => {
     shuttingDown = false;
+    activeToolCalls = 0;
     if (ctx.mode !== "tui") return;
     if (widgetRegistered) widgetUi?.setWidget(WIDGET_KEY, undefined);
     widgetUi = ctx.ui;
     widgetRegistered = false;
     widgetTui = undefined;
     updateWidget();
+  });
+
+  pi.registerMessageRenderer<CompletionDetails>("background-command-result", (message, { expanded }, theme) => {
+    const details = message.details as CompletionDetails | (Partial<CompletionRow> & { id?: string }) | undefined;
+    let rows: CompletionRow[] = [];
+    if (details && "jobs" in details && Array.isArray(details.jobs)) {
+      rows = details.jobs;
+    } else if (details && "id" in details && typeof details.id === "string") {
+      rows = [{ id: details.id, command: "", state: details.state ?? "exited", exitCode: details.exitCode, signal: details.signal, durationMs: 0 }];
+    }
+    if (!rows.length) return undefined;
+
+    const failed = rows.some((row) => row.state !== "exited");
+    const lines = [theme.bold(`Background · ${rows.length} job${rows.length === 1 ? "" : "s"} finished`)];
+    for (const row of rows) {
+      const icon = row.state === "exited" ? theme.fg("success", "✓") : theme.fg("error", "✗");
+      const command = truncateToWidth(stripTerminalSequences(row.command).replace(/\s+/g, " ").trim(), 60);
+      const outcome = row.exitCode === null || row.exitCode === undefined
+        ? (row.signal ?? row.state)
+        : `exit ${row.exitCode}`;
+      const elapsed = row.durationMs > 0 ? ` · ${Math.round(row.durationMs / 1000)}s` : "";
+      lines.push(`${icon} ${row.id}${command ? `  ${command}` : ""}  ${theme.fg("dim", `${outcome}${elapsed}`)}`);
+    }
+    if (expanded) {
+      const payload = typeof message.content === "string"
+        ? message.content
+        : message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+      lines.push("", ...payload.split("\n").map((line) => theme.fg("toolOutput", `  ${line}`)));
+    } else {
+      lines.push(theme.fg("dim", "  Ctrl+O to expand output"));
+    }
+    const box = new Box(1, 0, (text) => theme.bg(failed ? "toolErrorBg" : "toolSuccessBg", text));
+    box.addChild(new Text(lines.join("\n"), 0, 0));
+    return box;
+  });
+
+  function clearCompletionTimer(): void {
+    if (completionTimer) clearTimeout(completionTimer);
+    completionTimer = undefined;
+  }
+
+  function flushCompletions(): void {
+    clearCompletionTimer();
+    if (shuttingDown || pendingCompletions.size === 0) return;
+    const completed = [...pendingCompletions.values()];
+    pendingCompletions.clear();
+    const sections = completed.map((job) => `Background command ${job.id} finished.\n${statusForJob(job, OUTPUT_BYTES)}`);
+    const content = `Background command result${completed.length === 1 ? "" : "s"} (${completed.length}). Use these results to continue the user's task; no bg_status call is needed for final output.\n\n${sections.join("\n\n---\n\n")}`;
+    const details: CompletionDetails = {
+      jobs: completed.map((job) => ({
+        id: job.id, command: job.command, state: job.state, exitCode: job.exitCode,
+        signal: job.signal, durationMs: (job.endedAt ?? Date.now()) - job.startedAt,
+      })),
+    };
+    try {
+      pi.sendMessage({ customType: "background-command-result", content, display: true, details },
+        { deliverAs: "steer", triggerTurn: true });
+    } catch (error) {
+      const ids = completed.map((job) => job.id).join(", ");
+      const message = `Could not deliver background results ${ids}: ${String(error)}. Use bg_status to inspect them.`;
+      if (widgetUi) widgetUi.notify(message, "error");
+      else console.error(message);
+    }
+  }
+
+  function queueCompletion(job: Job): void {
+    pendingCompletions.set(job.id, job);
+    if (activeToolCalls > 0 || completionTimer) return;
+    completionTimer = setTimeout(flushCompletions, COMPLETION_BATCH_MS);
+  }
+
+  pi.on("tool_execution_start", () => {
+    if (activeToolCalls === 0) clearCompletionTimer();
+    activeToolCalls++;
+  });
+  pi.on("tool_execution_end", () => {
+    activeToolCalls = Math.max(0, activeToolCalls - 1);
+    if (activeToolCalls === 0 && pendingCompletions.size > 0) flushCompletions();
   });
 
   function append(job: Job, chunk: Buffer | string): void {
@@ -148,18 +240,7 @@ export default function (pi: ExtensionAPI) {
       job.endedAt = Date.now();
       updateWidget();
       if (job.autoDeliver && job.state !== "stopped" && !shuttingDown) {
-        try {
-          pi.sendMessage({
-            customType: "background-command-result",
-            content: `Background command finished. Use this result to continue the user's task; no bg_status call is needed for its final output.\n\n${status(job.id, OUTPUT_BYTES)}`,
-            display: true,
-            details: { id: job.id, state: job.state, exitCode: job.exitCode, signal: job.signal },
-          }, { deliverAs: "steer", triggerTurn: true });
-        } catch (error) {
-          const message = `Could not deliver background result ${job.id}: ${String(error)}. Use bg_status ${job.id}.`;
-          if (widgetUi) widgetUi.notify(message, "error");
-          else console.error(message);
-        }
+        queueCompletion(job);
       }
     });
     updateWidget();
@@ -178,10 +259,7 @@ export default function (pi: ExtensionAPI) {
     return `${summary(job)}\ncommand: ${job.command}\ncwd: ${job.cwd}`;
   }
 
-  function status(id?: string, maxChars = DEFAULT_VIEW_CHARS): string {
-    if (!id) return jobs.size ? [...jobs.values()].map(description).join("\n\n") : "No background jobs";
-    const job = jobs.get(id);
-    if (!job) throw new Error(`Unknown background job: ${id}`);
+  function statusForJob(job: Job, maxChars = DEFAULT_VIEW_CHARS): string {
     const output = job.output.toString("utf8").slice(-maxChars);
     const omitted = job.outputBytes > Buffer.byteLength(output);
     return [
@@ -190,6 +268,13 @@ export default function (pi: ExtensionAPI) {
       `output (${job.outputBytes} bytes${omitted ? ", showing tail" : ""}):`,
       output || "(none yet)",
     ].join("\n");
+  }
+
+  function status(id?: string, maxChars = DEFAULT_VIEW_CHARS): string {
+    if (!id) return jobs.size ? [...jobs.values()].map(description).join("\n\n") : "No background jobs";
+    const job = jobs.get(id);
+    if (!job) throw new Error(`Unknown background job: ${id}`);
+    return statusForJob(job, maxChars);
   }
 
   const result = (value: string) => ({ content: [{ type: "text" as const, text: value }], details: undefined });
@@ -271,6 +356,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
+    clearCompletionTimer();
+    pendingCompletions.clear();
     if (widgetTimer) clearInterval(widgetTimer);
     widgetTimer = undefined;
     if (widgetRegistered) widgetUi?.setWidget(WIDGET_KEY, undefined);

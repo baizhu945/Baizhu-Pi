@@ -10,9 +10,9 @@ let
 in
 {
   home.file = {
-    # ---- 本地技能（agent/skills/）----
-    ".pi/agent/skills/" = {
-      source = ../skills;
+    # ---- 本机 Pi 使用的本地技能；cc-connect 专用技能由服务入口单独加载 ----
+    ".pi/agent/skills/chrome-automation" = {
+      source = ../skills/chrome-automation;
       recursive = true;
     };
 

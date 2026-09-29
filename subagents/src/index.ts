@@ -1547,7 +1547,7 @@ export default function (pi: ExtensionAPI) {
 
   /** Derive a short model label from a model string. */
   function getModelLabelFromConfig(model: string): string {
-    // Strip provider prefix (e.g. "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6")
+    // Strip provider prefix (e.g. "anthropic/claude-sonnet-5-5" → "claude-sonnet-5-5")
     const name = model.includes("/") ? model.split("/").pop()! : model;
     // Strip trailing date suffix (e.g. "claude-haiku-4-5-20251001" → "claude-haiku-4-5")
     return name.replace(/-\d{8}$/, "");
@@ -1668,7 +1668,6 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - Use steer_subagent to send mid-run messages to a running background agent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
 - If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
-- Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.${isolationGuideline}${scheduleGuideline}
 
@@ -1769,7 +1768,7 @@ Terse command-style prompts produce shallow, generic work.
       model: Type.Optional(
         Type.String({
           description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
+            'Optional model override. Accepts "provider/modelId" or fuzzy name. Omit to use the agent type\'s default.',
         }),
       ),
       thinking: Type.Optional(
@@ -2014,11 +2013,6 @@ Terse command-style prompts produce shallow, generic work.
       // This is the pre-session snapshot — agent-manager overwrites it with the
       // effective values the moment a session reports them.
       const { modelName, modelId } = model ? describeModel(model) : { modelName: undefined, modelId: undefined };
-      // What the caller SPELLED, kept only if it names a different model than the
-      // one that won. Model input is fuzzy — `"haiku"` and
-      // `"anthropic/claude-haiku-4-5"` are the same model — so comparing the two
-      // strings would disclose an override that never happened. A spelling that
-      // resolves to nothing is still worth disclosing: it cannot have taken effect.
       const askedModel = ((asked: string | undefined) => {
         if (!asked) return undefined;
         const resolvedAsked = resolveModel(asked, ctx.modelRegistry);
@@ -3161,7 +3155,7 @@ Terse command-style prompts produce shallow, generic work.
     const targetDir = location.startsWith("Project") ? projectAgentsDir() : personalAgentsDir();
 
     const method = await ctx.ui.select("Creation method", [
-      "Generate with Claude (recommended)",
+      "Generate with current model",
       "Manual configuration",
     ]);
     if (!method) return;
@@ -3201,7 +3195,7 @@ The file format is a markdown file with YAML frontmatter and a system prompt bod
 description: <one-line description shown in UI>
 color: <optional agent name badge color: red, blue, green, yellow, purple, orange, pink, cyan, an Agency Agents alias, or quoted "#RRGGBB">
 tools: <comma-separated built-in tools: read, bash, edit, write, grep, find, ls. Use "none" for no tools. Omit for all tools>
-model: <optional model as "provider/modelId", e.g. "anthropic/claude-haiku-4-5". Omit to inherit parent model>
+model: <optional model as "provider/modelId", e.g. "deepseek/deepseek-flash". Omit to inherit parent model>
 thinking: <optional thinking level: ${THINKING_LEVELS.join(", ")}. Omit to inherit>
 prompt_mode: <"replace" (body IS the full system prompt) or "append" (body is appended to default prompt). Default: replace>
 extensions: <true (inherit all MCP/extension tools), false (none), or comma-separated names. Default: true>
@@ -3290,17 +3284,15 @@ Write the file using the write tool. Only write the file, nothing else.`;
     // 4. Model
     const modelChoice = await ctx.ui.select("Model", [
       "inherit (parent model)",
-      "haiku",
+      "custom...",
       "sonnet",
       "opus",
-      "custom...",
     ]);
     if (!modelChoice) return;
 
     let model: string | undefined;
-    if (modelChoice === "haiku") model = "anthropic/claude-haiku-4-5";
-    else if (modelChoice === "sonnet") model = "anthropic/claude-sonnet-4-6";
-    else if (modelChoice === "opus") model = "anthropic/claude-opus-4-6";
+    if (modelChoice === "sonnet") model = "anthropic/claude-sonnet-5-5";
+    else if (modelChoice === "opus") model = "anthropic/claude-opus-5-5";
     else if (modelChoice === "custom...") {
       model = (await ctx.ui.input("Model (provider/modelId)")) || undefined;
     }
