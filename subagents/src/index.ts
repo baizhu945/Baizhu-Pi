@@ -1597,7 +1597,7 @@ export default function (pi: ExtensionAPI) {
     schedule: Type.Optional(
       Type.String({
         description:
-          'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
+          'Schedule a background run instead of starting immediately. Omit for an immediate run. ' +
           'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
           'Runs in the background; incompatible with inherit_context and resume. Returns job ID.',
       }),
@@ -1607,7 +1607,7 @@ export default function (pi: ExtensionAPI) {
     isSchedulingEnabled() ? scheduleParamShape : {};
 
   const scheduleGuideline = isSchedulingEnabled()
-    ? `\n- Use \`schedule\` only when the user explicitly asked for scheduled / recurring / delayed execution (e.g. "every Monday", "in an hour"). Don't auto-schedule from vague intent like "monitor X" — run once now or ask.`
+    ? `\n- schedule supports cron, recurring intervals, and delayed one-shot runs.`
     : "";
 
   // Same trade as scheduleParam/scheduleGuideline above: `isolationParam` drops
@@ -1618,71 +1618,23 @@ export default function (pi: ExtensionAPI) {
   // With no per-result note by design, the model would have every reason to go
   // on reporting a `pi-agent-*` branch that was never created.
   const isolationGuideline = isWorktreeIsolationEnabled()
-    ? `\n- Use isolation: "worktree" to give the agent its own git worktree (safe parallel file modifications); leave it unset, or pass "off", for none. The worktree is removed when the agent finishes; if it made changes, they are committed to a branch and the branch is named in the result.`
+    ? `\n- isolation: "worktree" creates an isolated checkout, removed on completion; changes are committed to a branch named in the result.`
     : "";
 
-  const isolationCompactGuideline = isWorktreeIsolationEnabled()
-    ? `\n- isolation: "worktree" gives the agent its own git worktree (removed on completion); changes land on a branch named in the result.`
-    : "";
-
-  // Compact Agent tool description (#91, `toolDescriptionMode: "compact"`) —
-  // the same load-bearing facts as the full version at ~75% fewer tokens, for
-  // small/local models. Per-option details live in the param descriptions.
-  const compactAgentToolDescription = `Launch an autonomous agent for complex, multi-step tasks. Agent types:
+  // Both built-in descriptions contain only capabilities and invocation details.
+  const compactAgentToolDescription = `Launch a background subagent and return its ID. Completion delivers its final assistant message automatically. Agent types:
 ${buildCompactTypeListText()}
+
+Fresh context by default; inherit_context copies this conversation. resume continues a finished agent; steer_subagent messages a running one.${isolationGuideline}${scheduleGuideline}`;
+
+  const fullAgentToolDescription = `Launch a background subagent and return its ID. Completion automatically delivers its final assistant message to this session.
+
+Available agent types and tools:
+${buildTypeListText()}
 
 Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global).
 
-Notes:
-- description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
-- Parallel work: one message, multiple Agent calls — they run concurrently.
-- Subagents always run in the background; you'll be notified when one completes with its full result. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.
-- This extension imposes no turn-count limit on subagents; they run until they finish, are externally stopped, or hit a provider/context limit.
-- The complete result is delivered to this session in the completion notification. It contains the child's final assistant message, not intermediate steps or a transcript file. Verify an agent's claimed code changes before reporting work done.
-- resume continues a previous agent by ID; steer_subagent messages a running one.${isolationCompactGuideline}`;
-
-  const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
-
-Available agent types and the tools they have access to:
-${buildTypeListText()}
-
-Custom agents can be defined in .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global) — they are picked up automatically. Project-level agents override global ones. Creating a .md file with the same name as a default agent overrides it.
-
-When using the Agent tool, specify a subagent_type parameter to select which agent type to use.
-
-## When not to use
-
-If the target is already known, use a direct tool — \`read\` for a known path, \`grep\`/\`find\` for a specific symbol or string. Reserve this tool for open-ended questions that span the codebase, or tasks that match an available agent type.
-
-## Usage notes
-
-- Always include a short (3-5 word) description summarizing what the agent will do (shown in UI).
-- When you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently. If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks.
-- When the agent is done, its complete result is sent to this session as a completion notification. It contains the child's final assistant message, not intermediate steps or a transcript file.
-- Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting the work as done.
-- Agents run in the background by default. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
-- Agents always run in the background and return an ID immediately; completion is delivered to this session as an automatic notification containing the full result.
-- This extension imposes no turn-count limit on subagents; they run until they finish, are externally stopped, or hit a provider/context limit.
-- **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification is delivered as soon as the child settles (at the next safe tool boundary if this session is streaming); it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.
-- Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
-- Use steer_subagent to send mid-run messages to a running background agent.
-- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
-- If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
-- Use thinking to control extended thinking level.
-- Use inherit_context if the agent needs the parent conversation history.${isolationGuideline}${scheduleGuideline}
-
-## Writing the prompt
-
-Brief the agent like a smart colleague who just walked into the room — it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.
-- Explain what you're trying to accomplish and why.
-- Describe what you've already learned or ruled out.
-- Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
-- If you need a short response, say so ("report in under 200 words").
-- Lookups: hand over the exact command. Investigations: hand over the question — prescribed steps become dead weight when the premise is wrong.
-
-Terse command-style prompts produce shallow, generic work.
-
-**Never delegate understanding.** Don't write "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.`;
+Calls start with fresh context unless inherit_context is true. resume continues a finished agent by ID; steer_subagent sends messages to a running one. model and thinking override the agent defaults.${isolationGuideline}${scheduleGuideline}`;
 
   // `toolDescriptionMode: "custom"` — user-authored description with live
   // dynamic parts. Project file wins over global; missing/empty falls back to
@@ -1739,26 +1691,20 @@ Terse command-style prompts produce shallow, generic work.
     name: SUBAGENT_TOOL_NAMES.AGENT,
     label: "Agent",
     description: agentToolDescription,
-    promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
-    promptGuidelines: [
-      "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
-      "For broad codebase exploration or research, spawn Agent with an appropriate subagent_type (e.g. Explore). Otherwise use direct tools (read, grep, find) when the target is already known.",
-      "Agents always run in the background; their complete results are delivered automatically in a completion notification — do not poll or sleep waiting for them. Continue with other work instead.",
-      "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
-    ],
+    promptSnippet: "Launch a background subagent; completion automatically delivers its result",
     parameters: Type.Object({
       prompt: Type.String({
         description: "The task for the agent to perform.",
         minLength: 1,
       }),
       description: Type.String({
-        description: "A short (3-5 word) description of the task (shown in UI).",
+        description: "A short task summary shown in the UI.",
         minLength: 1,
       }),
       name: Type.Optional(
         Type.String({
           description:
-            'Optional memorable name for this agent, e.g. "auth-audit", so it can be addressed as `@name` at the prompt and by steer_subagent. Letters, digits, `_` and `-`. Worth setting when several agents of the same type run at once; omit for one-off work. The agent stays reachable by its type either way.',
+            'Optional handle for @mentions and steer_subagent. Letters, digits, `_` and `-`; also reachable by its agent type.',
         }),
       ),
       subagent_type: Type.String({
@@ -1778,7 +1724,7 @@ Terse command-style prompts produce shallow, generic work.
       ),
       resume: Type.Optional(
         Type.String({
-          description: "Optional agent ID to resume from. Continues previous context in the background and reports the result through the completion notification. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
+          description: "ID of a finished agent to continue with its previous context. Returns immediately; completion delivers the result automatically.",
         }),
       ),
       isolated: Type.Optional(
@@ -2152,8 +2098,7 @@ Terse command-style prompts produce shallow, generic work.
           `Agent ID: ${id}\n` +
           `Type: ${existing.type}\n` +
           (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
-          `\nYou will be notified when this agent completes.\n` +
-          `The complete result will be sent automatically when this resumed agent finishes. Use steer_subagent to send it messages while it runs.`,
+          `\nCompletion automatically delivers the result. steer_subagent can send messages while the agent is running.`,
           { ...detailBaseFor(record), toolUses: record.toolUses, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
         );
       }
@@ -2240,9 +2185,7 @@ Terse command-style prompts produce shallow, generic work.
           `Type: ${displayName}\n` +
           `Description: ${params.description}\n` +
           (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
-          `\nYou will be notified when this agent completes.\n` +
-          `The complete result will be sent automatically when this agent finishes. Use steer_subagent to send it messages while it runs.\n` +
-          `Do not duplicate this agent's work.`,
+          `\nCompletion automatically delivers the result. steer_subagent can send messages while the agent is running.`,
           { ...detailBaseFor(record), toolUses: 0, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
         );
       }
@@ -2391,12 +2334,7 @@ Terse command-style prompts produce shallow, generic work.
     name: SUBAGENT_TOOL_NAMES.WORKFLOW,
     label: "SubagentWorkflow",
     description: renderToolDescriptionTemplate(fullWorkflowToolDescription),
-    promptSnippet: "Run a deterministic script that orchestrates many subagents",
-    promptGuidelines: [
-      "Use SubagentWorkflow when the number of agents depends on something discovered at runtime, when work flows through stages, or when findings should be independently verified. Use Agent for one delegated task or a handful you can name up front.",
-      "Prefer `pipeline` over `parallel` — a barrier costs wall-clock whenever the stages are unevenly sized.",
-      "A workflow runs in the background and notifies you when it finishes — do not poll or sleep waiting for it.",
-    ],
+    promptSnippet: "Run a JavaScript workflow that coordinates subagents",
     parameters: Type.Object({
       script: Type.Optional(
         Type.String({
@@ -3549,7 +3487,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         {
           id: "toolDescriptionMode",
           label: "Tool description",
-          description: "Agent tool description sent to the LLM: full (rich, default), compact (~75% fewer tokens, for small/local models), or custom (.pi/agent-tool-description.md with {{placeholders}})",
+          description: "Agent tool description sent to the LLM: full (roster and invocation details, default), compact (short reference), or custom (.pi/agent-tool-description.md with {{placeholders}})",
           currentValue: getToolDescriptionMode(),
           values: ["full", "compact", "custom"],
         },
