@@ -3,6 +3,7 @@
 {
   imports = [
     ./subagents.nix
+    ./fusion.nix
     ./skills.nix
   ];
 

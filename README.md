@@ -39,6 +39,30 @@
 
 Pi 0.84.4 已原生提供全屏模式的鼠标选择、滚轮、双击单词选择和复制控制；普通模式继续交给终端处理原生文本选择。配置中的 `extensions/sidebar.ts` 保留为兼容 0.84.4 公共 API 的底栏扩展，显示 token、美元成本、上下文、模型、分支、状态和 Todo 摘要。启动界面额外通过 `startup-logo.patch` 显示居中的大号 Pi logo。
 
+### `/resume` 子会话折叠（纯插件）
+
+`extensions/session-picker/` 使用公开扩展 API 实现折叠选择器，不修改 Pi 本体，也不依赖私有选择器字段。通过原生输入监听和 `TUI.getFocusedComponent()`，在提交时读取实际焦点编辑器的公开 `onSubmit` 回调，把单独提交的 `/resume` 路由到 `/session-picker`；不替换编辑器，保留 `pi-open-tui` 的按键和外观。
+
+- 默认 Threaded 会话树只显示父会话；父子关系沿用 `parentSessionPath`，因此普通 fork 也会折叠。
+- 父会话显示 `▸` / `▾`；选中后 `→` 展开全部后代，`←` 收起。子会话上按 `←` 也可回到父会话并收起。
+- 搜索会显示匹配的子会话，即使它原本折叠；有搜索文本时左右键仍用于编辑搜索。Recent/Fuzzy 排序保留平面列表。
+- 保留范围切换、分页、命名过滤、路径显示、恢复、重命名和删除；删除当前会话被禁止，永久删除需另行确认，不会递归删除子会话。
+- 每次打开默认重新折叠；同一次选择器内切换范围、异步加载和搜索不会清空折叠状态。Pi 的进度回调可能只有计数、没有会话数组；只有实际数组快照才更新列表，完整加载或失败后忽略迟到的回调。折叠本身不会修改历史文件。
+- `/resume-native` 可打开原生选择器。插件不改变 CLI 启动阶段的 `pi --resume` / `pi -r` 选择器。
+
+文件由已有 Home Manager `home.file` 递归部署。运行 `home-manager switch` 后在 Pi 执行 `/reload` 即可，无需重建 Pi 本体。Pi 的个人扩展优先于包扩展加载，后加载的 `pi-open-tui` 可能替换编辑器；路由在实际提交时处理当前焦点，因此不依赖加载顺序或保存的启动编辑器。也可直接使用 `/session-picker`。
+
+回归测试（不会调用模型）：
+
+```sh
+node tests/session-picker.test.mjs /path/to/pi-coding-agent/lib/node_modules/pi-monorepo
+# 伪终端默认创建 134 个 JSONL 会话，检查完整加载、上下键、分页、范围、搜索及左右键：
+nix-shell -p python3Packages.pyte --run 'python3 tests/session-picker-pty.py'
+nix-shell -p python3Packages.pyte --run 'python3 tests/session-picker-pty.py --mode regular'
+# 可选：对实际历史目录只读测试（不恢复、删除或改写会话）：
+node tests/session-picker.test.mjs /path/to/pi-coding-agent/lib/node_modules/pi-monorepo "$PWD/extensions/session-picker/index.ts" "$HOME/.pi/agent/sessions/--home-baizhu945--" "$HOME"
+```
+
 ## 成本、命令执行与补丁
 
 - `startup-logo.patch` 在启动界面显示放大的 Pi logo，同时保留版本号和可展开的启动帮助。

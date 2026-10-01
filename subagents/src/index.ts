@@ -1692,6 +1692,11 @@ Calls start with fresh context unless inherit_context is true. resume continues 
     label: "Agent",
     description: agentToolDescription,
     promptSnippet: "Launch a background subagent; completion automatically delivers its result",
+    promptGuidelines: [
+      "Before spawning, assign non-overlapping scopes and deliverables; reserve useful independent work for yourself.",
+      "While subagents run, advance your own scope; do not repeat their searches, analysis, or edits. Integrate and verify outputs after they return.",
+      "If no independent work remains, end the turn with a brief pending status and await automatic notifications. Do not poll, sleep, invent busywork, or declare the overall task complete.",
+    ],
     parameters: Type.Object({
       prompt: Type.String({
         description: "The task for the agent to perform.",
