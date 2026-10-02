@@ -44,7 +44,7 @@ export default function (pi: ExtensionAPI) {
   const jobs = new Map<string, Job>();
   const pendingCompletions = new Map<string, Job>();
   let shuttingDown = false;
-  let activeToolCalls = 0;
+  let agentRunning = false;
   let completionTimer: NodeJS.Timeout | undefined;
   let widgetUi: ExtensionContext["ui"] | undefined;
   let widgetTui: { terminal: { columns: number }; requestRender(): void } | undefined;
@@ -94,7 +94,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx) => {
     shuttingDown = false;
-    activeToolCalls = 0;
+    agentRunning = false;
     if (ctx.mode !== "tui") return;
     if (widgetRegistered) widgetUi?.setWidget(WIDGET_KEY, undefined);
     widgetUi = ctx.ui;
@@ -168,17 +168,24 @@ export default function (pi: ExtensionAPI) {
 
   function queueCompletion(job: Job): void {
     pendingCompletions.set(job.id, job);
-    if (activeToolCalls > 0 || completionTimer) return;
-    completionTimer = setTimeout(flushCompletions, COMPLETION_BATCH_MS);
+    if (agentRunning || completionTimer) return;
+    completionTimer = setTimeout(() => {
+      completionTimer = undefined;
+      if (!agentRunning) flushCompletions();
+    }, COMPLETION_BATCH_MS);
   }
 
-  pi.on("tool_execution_start", () => {
-    if (activeToolCalls === 0) clearCompletionTimer();
-    activeToolCalls++;
+  // Keep results here throughout inference AND the entire tool batch. Sending
+  // during inference puts separate messages in Pi's one-at-a-time steer queue,
+  // even when all those results are waiting before the next tool returns.
+  pi.on("agent_start", () => {
+    agentRunning = true;
+    clearCompletionTimer();
   });
-  pi.on("tool_execution_end", () => {
-    activeToolCalls = Math.max(0, activeToolCalls - 1);
-    if (activeToolCalls === 0 && pendingCompletions.size > 0) flushCompletions();
+  pi.on("turn_end", () => flushCompletions());
+  pi.on("agent_end", () => {
+    agentRunning = false;
+    flushCompletions();
   });
 
   function append(job: Job, chunk: Buffer | string): void {
@@ -282,9 +289,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "bg_run",
     label: "Background command",
-    description: "Run a command in the background when you can do independent work while it runs, need a persistent server or watcher, or the user explicitly requests it. Otherwise, if your next step requires its result, use the normal bash tool. Returns a job ID; completion automatically delivers exit status and output. Continue other work instead of sleeping or polling. Use bg_status only when interim progress affects your next action, and bg_kill to stop a job.",
+    description: "Start a background command in the current directory. Returns a job ID; completion automatically delivers exit status and output.",
     promptGuidelines: [
-      "Use bg_run to overlap work, keep a server or watcher alive, or honor an explicit background request. If you would immediately wait, use bash. Completion arrives automatically; do not poll.",
+      "Use bg_run for independent work or persistent processes; use bash if the next step needs the result. Completion is automatic; avoid polling.",
     ],
     parameters: Type.Object({
       command: Type.String({ description: "Shell command to start in the current working directory" }),
@@ -302,7 +309,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "bg_status",
     label: "Background status",
-    description: "Inspect a job without waiting, only when its interim progress affects your next action or you need its saved status. Completion is delivered automatically; do not poll for it. Omit the ID to list jobs. Output is a bounded tail.",
+    description: "Read a job status and bounded output tail, or omit id to list jobs. Completion is automatic; query interim status only when useful.",
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: "Job ID returned by bg_run; omit to list all tracked jobs" })),
       maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 8192, description: "Maximum recent output characters to show for one job (default 4000)" })),
@@ -318,7 +325,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "bg_kill",
     label: "Stop background command",
-    description: "Use when a background job is no longer needed, is stuck, was started with the wrong command, or the user asks to stop it. Stops the job's process group with SIGTERM and escalates to SIGKILL after two seconds if necessary. The response may say stopping while termination is in progress; call bg_status with the same ID to confirm it has stopped.",
+    description: "Stop a background process group (SIGTERM, then SIGKILL after 2 seconds if needed). Use bg_status to confirm a stopping job has exited.",
     parameters: Type.Object({ id: Type.String({ description: "Job ID returned by bg_run or listed by bg_status" }) }),
     async execute(_id, params) {
       const job = jobs.get(params.id);

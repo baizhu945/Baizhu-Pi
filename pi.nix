@@ -2,8 +2,7 @@
 
 {
   imports = [
-    ./subagents.nix
-    ./fusion.nix
+    ./extensions.nix
     ./skills.nix
   ];
 
@@ -33,11 +32,6 @@
       retry.maxRetries = 5;
 
       packages = [
-        "npm:@juicesharp/rpiv-ask-user-question"
-        "npm:pi-web-access"
-        "npm:@narumitw/pi-goal"
-        "npm:@tintinweb/pi-tasks"
-
         "npm:pi-open-tui"
       ];
     };
@@ -59,11 +53,6 @@
         "allowBrowserCookies": false
       }
     '';
-
-    ".pi/agent/extensions" = {
-      source = ./extensions;
-      recursive = true;
-    };
 
     # ---- 快捷键：思维链折叠/展开（alt+t 为未占用的新键，ctrl+t 为内置默认）----
     ".pi/agent/keybindings.json".source = ./keybindings.json;
