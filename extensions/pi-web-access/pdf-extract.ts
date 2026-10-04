@@ -1,9 +1,8 @@
 /**
  * PDF Content Extractor
  *
- * Converts PDFs to Markdown. The `auto` provider chain runs Datalab
- * (deterministic, layout-aware) first, then Gemini API, with unpdf as the
- * deterministic local fallback; the chain can also be pinned with
+ * Converts PDFs to Markdown. The `auto` provider chain runs Gemini API
+ * first, with unpdf as the deterministic local fallback; the chain can also be pinned with
  * `pdf.provider`.
  */
 
@@ -12,14 +11,6 @@ import { writeFile, mkdir } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { CredentialResolutionError } from "./credential-source.ts";
-import {
-	DATALAB_MODE_VALUES,
-	DEFAULT_DATALAB_TIMEOUT_MS,
-	isDatalabApiAvailable,
-	normalizeDatalabMode,
-	extractPDFViaDatalab,
-	type DatalabMode,
-} from "./datalab-pdf-extract.ts";
 import { isGeminiApiAvailable } from "./gemini-api.ts";
 import { extractPDFViaGemini } from "./gemini-pdf-extract.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
@@ -41,12 +32,11 @@ export interface PDFExtractOptions {
 	geminiTimeoutMs?: number;
 }
 
-export type PDFProvider = "auto" | "gemini" | "datalab" | "unpdf";
+export type PDFProvider = "auto" | "gemini" | "unpdf";
 
 export const PDF_PROVIDER_VALUES = new Set<PDFProvider>([
 	"auto",
 	"gemini",
-	"datalab",
 	"unpdf",
 ]);
 
@@ -55,13 +45,10 @@ export interface PDFConfig {
 	maxSizeMB: number;
 	maxPages: number;
 	provider: PDFProvider;
-	datalabMode: DatalabMode;
-	datalabTimeoutMs: number;
 }
 
 export const DEFAULT_PDF_MAX_SIZE_MB = 20;
 export const MAX_PDF_MAX_SIZE_MB = 50;
-export const MAX_DATALAB_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_PAGES = 100;
 const DEFAULT_OUTPUT_DIR = join(tmpdir(), "pi-web-pdf");
 const CONFIG_PATH = getWebSearchConfigPath();
@@ -74,8 +61,6 @@ export function loadPDFConfig(): PDFConfig {
 			maxSizeMB: DEFAULT_PDF_MAX_SIZE_MB,
 			maxPages: DEFAULT_MAX_PAGES,
 			provider: "auto",
-			datalabMode: normalizeDatalabMode(process.env.DATALAB_MODE),
-			datalabTimeoutMs: DEFAULT_DATALAB_TIMEOUT_MS,
 		};
 	}
 
@@ -110,43 +95,24 @@ export function loadPDFConfig(): PDFConfig {
 			? Math.max(1, Math.floor(configuredMaxPages))
 			: DEFAULT_MAX_PAGES;
 
+	if (pdf.provider !== undefined && !PDF_PROVIDER_VALUES.has(pdf.provider as PDFProvider)) {
+		throw new Error(`Unsupported pdf.provider: ${String(pdf.provider)}. Use auto, gemini or unpdf.`);
+	}
 	const provider =
 		typeof pdf.provider === "string" &&
 		PDF_PROVIDER_VALUES.has(pdf.provider as PDFProvider)
 			? (pdf.provider as PDFProvider)
 			: "auto";
-	const datalabMode =
-		typeof pdf.datalabMode === "string" &&
-		DATALAB_MODE_VALUES.has(pdf.datalabMode as DatalabMode)
-			? (pdf.datalabMode as DatalabMode)
-			: normalizeDatalabMode(process.env.DATALAB_MODE);
-	const configuredTimeout = pdf.datalabTimeoutMs;
-	const datalabTimeoutMs =
-		typeof configuredTimeout === "number" &&
-		Number.isFinite(configuredTimeout) &&
-		configuredTimeout > 0
-			? Math.min(configuredTimeout, MAX_DATALAB_TIMEOUT_MS)
-			: DEFAULT_DATALAB_TIMEOUT_MS;
 
 	return {
 		enabled,
 		maxSizeMB: normalized,
 		maxPages,
 		provider,
-		datalabMode,
-		datalabTimeoutMs,
 	};
 }
 
 async function getUnpdf() {
-	if (
-		typeof (Promise as PromiseConstructor & { try?: unknown }).try !==
-		"function"
-	) {
-		const { default: promiseTry } = await import("promise.try");
-		promiseTry.shim();
-	}
-
 	const [unpdf, pdfjs] = await Promise.all([
 		import("unpdf"),
 		import("unpdf/pdfjs"),
@@ -184,29 +150,6 @@ export async function extractPDFToMarkdown(
 	const urlTitle = extractTitleFromURL(url);
 	const provider = pdfConfig.provider;
 
-	if (provider === "auto" || provider === "datalab") {
-		try {
-			if (isDatalabApiAvailable()) {
-				const result = await extractPDFViaDatalab(buffer, {
-					maxPages: safeMaxPages,
-					title: urlTitle,
-					mode: pdfConfig.datalabMode,
-					timeoutMs: pdfConfig.datalabTimeoutMs,
-					...(signal ? { signal } : {}),
-				});
-				return writeMarkdownResult({
-					markdownBody: result.markdown,
-					title: urlTitle,
-					pages: result.pages,
-					outputDir,
-					filename,
-					url,
-				});
-			}
-		} catch (err) {
-			if (shouldRethrowExtractionError(err, signal)) throw err;
-		}
-	}
 
 	if (provider === "auto" || provider === "gemini") {
 		try {

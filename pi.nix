@@ -43,14 +43,12 @@
     # Clash/Mihomo TUN 代理把公网域名解析成 198.18.0.0/15 的 fake-IP，
     # 导致包内 SSRF DNS 预检拦截所有抓取。仅放行该代理合成网段
     # （私网/localhost/字面 IP 仍被拦截，安全语义不变）。
-    # allowBrowserCookies：启用 Gemini Web 的 Chromium cookie 提取；默认关闭，
-    # 避免子代理/网络扩展读取浏览器会话数据。需要时再显式改为 true。
+    # 本地 pi-web-access 已移除 Gemini Web 和浏览器 Cookie 提取。
     ".pi/agent/web-search.json".text = ''
       {
         "ssrf": {
           "allowRanges": ["198.18.0.0/15"]
-        },
-        "allowBrowserCookies": false
+        }
       }
     '';
 

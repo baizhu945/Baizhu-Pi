@@ -36,32 +36,32 @@ describe("tasks config", () => {
   });
 
   it("loads global defaults from the agent directory", () => {
-    writeJson(globalConfigPath, { autoCascade: true, maxVisible: 20 });
+    writeJson(globalConfigPath, { collapseCompleted: true, maxVisible: 20 });
 
-    expect(loadGlobalTasksConfig(agentDir)).toEqual({ autoCascade: true, maxVisible: 20 });
-    expect(loadTasksConfig(cwd, agentDir)).toEqual({ autoCascade: true, maxVisible: 20 });
+    expect(loadGlobalTasksConfig(agentDir)).toEqual({ collapseCompleted: true, maxVisible: 20 });
+    expect(loadTasksConfig(cwd, agentDir)).toEqual({ collapseCompleted: true, maxVisible: 20 });
   });
 
   it("merges project overrides over global defaults", () => {
-    writeJson(globalConfigPath, { autoCascade: true, maxVisible: 20, taskScope: "session" });
-    writeJson(projectConfigPath, { autoCascade: false, maxVisible: 10 });
+    writeJson(globalConfigPath, { collapseCompleted: true, maxVisible: 20, taskScope: "session" });
+    writeJson(projectConfigPath, { collapseCompleted: false, maxVisible: 10 });
 
-    expect(loadTasksConfig(cwd, agentDir)).toEqual({ autoCascade: false, maxVisible: 10, taskScope: "session" });
+    expect(loadTasksConfig(cwd, agentDir)).toEqual({ collapseCompleted: false, maxVisible: 10, taskScope: "session" });
   });
 
   it("ignores a malformed global config", () => {
     writeFileSync(globalConfigPath, "{");
-    writeJson(projectConfigPath, { autoCascade: false });
+    writeJson(projectConfigPath, { collapseCompleted: false });
 
-    expect(loadTasksConfig(cwd, agentDir)).toEqual({ autoCascade: false });
+    expect(loadTasksConfig(cwd, agentDir)).toEqual({ collapseCompleted: false });
   });
 
   it("falls back to global defaults when the project config is malformed", () => {
-    writeJson(globalConfigPath, { autoCascade: true });
+    writeJson(globalConfigPath, { collapseCompleted: true });
     mkdirSync(dirname(projectConfigPath), { recursive: true });
     writeFileSync(projectConfigPath, "{");
 
-    expect(loadTasksConfig(cwd, agentDir)).toEqual({ autoCascade: true });
+    expect(loadTasksConfig(cwd, agentDir)).toEqual({ collapseCompleted: true });
   });
 
   it("ignores non-object config values", () => {
@@ -72,33 +72,33 @@ describe("tasks config", () => {
   });
 
   it("saves project settings when no global defaults exist", () => {
-    saveTasksConfig({ autoCascade: true, maxVisible: 15 }, cwd, agentDir);
+    saveTasksConfig({ collapseCompleted: true, maxVisible: 15 }, cwd, agentDir);
 
-    expect(JSON.parse(readFileSync(projectConfigPath, "utf-8"))).toEqual({ autoCascade: true, maxVisible: 15 });
+    expect(JSON.parse(readFileSync(projectConfigPath, "utf-8"))).toEqual({ collapseCompleted: true, maxVisible: 15 });
   });
 
   it("saves only values that differ from global defaults", () => {
-    writeJson(globalConfigPath, { autoCascade: true, maxVisible: 20 });
+    writeJson(globalConfigPath, { collapseCompleted: true, maxVisible: 20 });
 
-    saveTasksConfig({ autoCascade: true, maxVisible: 30, showAll: false }, cwd, agentDir);
+    saveTasksConfig({ collapseCompleted: true, maxVisible: 30, showAll: false }, cwd, agentDir);
 
     expect(JSON.parse(readFileSync(projectConfigPath, "utf-8"))).toEqual({ maxVisible: 30, showAll: false });
-    expect(JSON.parse(readFileSync(globalConfigPath, "utf-8"))).toEqual({ autoCascade: true, maxVisible: 20 });
+    expect(JSON.parse(readFileSync(globalConfigPath, "utf-8"))).toEqual({ collapseCompleted: true, maxVisible: 20 });
   });
 
   it("preserves a project override across save and reload cycles", () => {
-    writeJson(globalConfigPath, { autoCascade: true, maxVisible: 20 });
+    writeJson(globalConfigPath, { collapseCompleted: true, maxVisible: 20 });
     const config = loadTasksConfig(cwd, agentDir);
-    config.autoCascade = false;
+    config.collapseCompleted = false;
     saveTasksConfig(config, cwd, agentDir);
 
     const reloaded = loadTasksConfig(cwd, agentDir);
-    expect(reloaded).toEqual({ autoCascade: false, maxVisible: 20 });
+    expect(reloaded).toEqual({ collapseCompleted: false, maxVisible: 20 });
     reloaded.maxVisible = 30;
     saveTasksConfig(reloaded, cwd, agentDir);
 
-    expect(loadTasksConfig(cwd, agentDir)).toEqual({ autoCascade: false, maxVisible: 30 });
-    expect(JSON.parse(readFileSync(projectConfigPath, "utf-8"))).toEqual({ autoCascade: false, maxVisible: 30 });
+    expect(loadTasksConfig(cwd, agentDir)).toEqual({ collapseCompleted: false, maxVisible: 30 });
+    expect(JSON.parse(readFileSync(projectConfigPath, "utf-8"))).toEqual({ collapseCompleted: false, maxVisible: 30 });
   });
 
   it("round-trips a custom sortOrder spec", () => {
@@ -130,9 +130,9 @@ describe("tasks config", () => {
   });
 
   it("writes an empty project override object when effective settings match global defaults", () => {
-    writeJson(globalConfigPath, { autoCascade: true });
+    writeJson(globalConfigPath, { collapseCompleted: true });
 
-    saveTasksConfig({ autoCascade: true }, cwd, agentDir);
+    saveTasksConfig({ collapseCompleted: true }, cwd, agentDir);
 
     expect(existsSync(projectConfigPath)).toBe(true);
     expect(JSON.parse(readFileSync(projectConfigPath, "utf-8"))).toEqual({});
@@ -148,9 +148,9 @@ describe("tasks config", () => {
   });
 
   it("leaves glyphs absent when neither config sets any", () => {
-    writeJson(globalConfigPath, { autoCascade: true });
+    writeJson(globalConfigPath, { collapseCompleted: true });
 
-    expect(loadTasksConfig(cwd, agentDir)).toEqual({ autoCascade: true });
+    expect(loadTasksConfig(cwd, agentDir)).toEqual({ collapseCompleted: true });
   });
 
   it("does not copy global glyphs into the project override", () => {

@@ -1,6 +1,6 @@
 /**
- * Shared test harness: a minimal fake ExtensionAPI plus a fake @tintinweb/pi-subagents
- * extension, so tests can drive src/index.ts without a real pi session.
+ * Shared test harness: a minimal fake ExtensionAPI for the four task tools,
+ * so tests can drive src/index.ts without a real pi session.
  */
 
 import { vi } from "vitest";
@@ -78,7 +78,7 @@ export function mockPi() {
       }
       return results;
     },
-    /** Emit an event on pi.events (simulates subagent extension). */
+    /** Emit an event on pi.events. */
     emitEvent(channel: string, data: unknown) {
       pi.events.emit(channel, data);
     },
@@ -120,93 +120,3 @@ export function mockSessionCtx(sessionId: string, opts?: { persisted?: boolean; 
   };
 }
 
-/**
- * Simulates the @tintinweb/pi-subagents extension: answers the ping, spawn, stop and
- * consume RPCs, emits ready, and settles agents the way the real extension does.
- *
- * `settle()` mirrors pi-subagents' completion path, which is what makes the
- * duplicate-follow-up behaviour testable: the lifecycle event fires first, then the
- * completion notification is *held* briefly (200 ms upstream, `NUDGE_HOLD_MS`) and
- * sent only if nothing marked the result consumed while it waited. A held nudge
- * lands in `notified`; each entry there costs the parent an extra model turn.
- */
-export function installSubagentsMock(
-  pi: { events: MockEventBus },
-  opts?: { spawnError?: string; version?: number; withoutConsume?: boolean },
-) {
-  let idCounter = 0;
-  const spawned: Array<{ id: string; type: string; prompt: string; options: any }> = [];
-  const stopped: string[] = [];
-  const consumed: string[] = [];
-  const notified: string[] = [];
-
-  // Respond to ping — reply on scoped channel
-  const unsubPing = pi.events.on("subagents:rpc:ping", (data: unknown) => {
-    const { requestId } = data as { requestId: string };
-    pi.events.emit(`subagents:rpc:ping:reply:${requestId}`, { success: true, data: { version: opts?.version ?? 2 } });
-  });
-
-  // Respond to spawn — reply on scoped channel
-  const unsubSpawn = pi.events.on("subagents:rpc:spawn", (data: unknown) => {
-    const { requestId, type, prompt, options } = data as {
-      requestId: string; type: string; prompt: string; options?: any;
-    };
-    if (opts?.spawnError) {
-      pi.events.emit(`subagents:rpc:spawn:reply:${requestId}`, { success: false, error: opts.spawnError });
-      return;
-    }
-    const id = `agent-${++idCounter}`;
-    spawned.push({ id, type, prompt, options });
-    pi.events.emit(`subagents:rpc:spawn:reply:${requestId}`, { success: true, data: { id } });
-  });
-
-  // Respond to stop — reply on scoped channel
-  const unsubStop = pi.events.on("subagents:rpc:stop", (data: unknown) => {
-    const { requestId, agentId } = data as { requestId: string; agentId: string };
-    const known = spawned.some(s => s.id === agentId);
-    if (known) {
-      stopped.push(agentId);
-      pi.events.emit(`subagents:rpc:stop:reply:${requestId}`, { success: true });
-    } else {
-      pi.events.emit(`subagents:rpc:stop:reply:${requestId}`, { success: false, error: "Agent not found" });
-    }
-  });
-
-  // Respond to consume — reply on scoped channel. `withoutConsume` stands in for a
-  // pi-subagents from before the channel existed, which leaves it unanswered.
-  const unsubConsume = opts?.withoutConsume ? () => {} : pi.events.on("subagents:rpc:consume", (data: unknown) => {
-    const { requestId, agentId } = data as { requestId: string; agentId: string };
-    const known = spawned.some(s => s.id === agentId);
-    if (known) {
-      consumed.push(agentId);
-      pi.events.emit(`subagents:rpc:consume:reply:${requestId}`, { success: true });
-    } else {
-      pi.events.emit(`subagents:rpc:consume:reply:${requestId}`, { success: false, error: "Agent not found" });
-    }
-  });
-
-  // Broadcast readiness
-  pi.events.emit("subagents:ready", {});
-
-  /** Stand-in for pi-subagents' 200 ms NUDGE_HOLD_MS — a real timer, kept short. */
-  const NUDGE_HOLD_MS = 20;
-
-  function settle(channel: "subagents:completed" | "subagents:failed", agentId: string, data: Record<string, unknown>) {
-    pi.events.emit(channel, { id: agentId, ...data });
-    setTimeout(() => { if (!consumed.includes(agentId)) notified.push(agentId); }, NUDGE_HOLD_MS);
-  }
-
-  return {
-    spawned,
-    stopped,
-    consumed,
-    notified,
-    /** Agent finished successfully. */
-    complete(agentId: string, result?: string) { settle("subagents:completed", agentId, { result }); },
-    /** Agent failed (or was stopped, with `status: "stopped"`). */
-    fail(agentId: string, error: string, status = "error") { settle("subagents:failed", agentId, { error, status }); },
-    /** Wait past the notification hold, so `notified` is final. */
-    afterNudgeHold() { return new Promise<void>(resolve => setTimeout(resolve, NUDGE_HOLD_MS * 2)); },
-    unsub() { unsubPing(); unsubSpawn(); unsubStop(); unsubConsume(); },
-  };
-}

@@ -1,3 +1,5 @@
+> Local build: see [LOCAL.md](LOCAL.md) for removed browser-cookie capabilities and the vendored MCP client.
+
 <p>
   <img src="banner.png" alt="pi-web-access" width="1100">
 </p>
@@ -499,7 +501,6 @@ Config defaults to `~/.pi/agent/web-search.json` when neither `PI_CODING_AGENT_D
     "fetchContent": { "enabled": true },
     "getSearchContent": { "enabled": true }
   },
-  "toolActivation": "auto",
   "commands": {
     "websearch": { "enabled": true },
     "curator": { "enabled": true },
@@ -995,19 +996,13 @@ Remote curator sessions print the URL instead of trying to open a browser by def
 
 When `false`, a requested Curator session never tries to open a Glimpse window or a browser and always prints the URL for you to open manually. For requested local-only Curator sessions it defaults to `true`; remote curator sessions print the URL unless you set `autoOpenBrowser: true` explicitly. This is worth setting locally when you would rather paste the link into a specific browser than have one launched for you. It changes nothing about where the server binds; that is `curatorRemote`'s job alone.
 
-### Tool activation
+### Tool availability
 
-With dynamic activation, Pi starts a session with only the compact `web_enable` tool. Its guidance lists only the web capabilities enabled in `web-search.json`. The model can call it without a human toggle; the configured search, source-check, fetch, and stored-content tools then appear on the immediately following model request. Disabled tools stay unregistered, and alternate `toolNames` are preserved. Warm and resumed sessions retain their recorded tool selection, so a session recorded without `web_enable` does not gain it after an install or upgrade; start a new session to use web tools there.
-
-Enabling the tools mid-conversation can cost a prompt-cache miss. Some models accept tools added partway through a conversation. For the others, Pi resends the whole conversation on the request after `web_enable`, which can invalidate the cached prefix for that request. Later requests can cache the updated conversation again.
-
-`"toolActivation"` in `web-search.json` picks the behavior:
-
-- `"auto"` (the default) uses dynamic activation when the session's model accepts added tools, according to Pi's model catalog. Otherwise every enabled web tool is available from the first request, so `web_enable` never causes that cache miss. The choice is made once, from the model selected when a new session starts; switching models later doesn't change it, and warm or resumed sessions keep their recorded tools.
-- `"dynamic"` starts every new session with `web_enable`, even on models where enabling the tools can cause a cache miss.
-- `"eager"` never uses `web_enable` and keeps every enabled web tool available from the first request. It also suits models that rarely call `web_enable` on their own.
-
-Restart Pi after changing it. Dynamic activation needs Pi 0.86.0 or newer; older Pi logs a warning and keeps every enabled web tool available.
+This local build exposes `web_search`, `source_check`, `fetch_content`, and
+`get_search_content` directly from the first model request. No loader tool or
+activation mode is required. Starting or restoring a session and navigating
+older branches keeps the configured web tools available. Explicit per-tool
+disabling and alternate `toolNames` are still respected.
 
 ### Shortcuts
 

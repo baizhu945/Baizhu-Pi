@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
 import { hasCredentialSource, redactCredential, resolveCredential } from "./credential-source.ts";
 import { normalizeDomain } from "./domain-filter-normalization.ts";
-import type { SearchOptions, SearchResponse } from "./perplexity.ts";
+import type { SearchOptions, SearchResponse } from "./search-types.ts";
 import { formatSearchResultsAsAnswer } from "./search-answer-formatting.ts";
 import { normalizeSearchResultCount } from "./search-result-count-normalization.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
@@ -103,10 +103,7 @@ export async function searchWithZai(query: string, options: SearchOptions = {}):
 	try { headers = new Headers({ Authorization: `Bearer ${apiKey}` }); }
 	catch { throw new Error("Z.ai credential resolution failed: invalid-header-value"); }
 	// Load the protocol client only when this explicit provider is selected.
-	const [{ Client }, { StreamableHTTPClientTransport }] = await Promise.all([
-		import("@modelcontextprotocol/sdk/client/index.js"),
-		import("@modelcontextprotocol/sdk/client/streamableHttp.js"),
-	]);
+	const { Client, StreamableHTTPClientTransport } = await import("./mcp-client.ts");
 	let cleaningUp = false;
 	const transport = new StreamableHTTPClientTransport(new URL(mcpUrl), {
 		requestInit: { headers },

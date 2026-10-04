@@ -4,10 +4,8 @@ import { checkpointGoalActiveTime, formatDuration, formatTokenCount, updateGoalU
 import { formatError, isStaleContextError, notifyTerminal, safeGoalMenuText, truncateNotification } from "./errors.js";
 import {
   createGoalContextContract,
-  createInactiveGoalContextContract,
   hasGoalContextContract,
   hasGoalContextContractHistory,
-  hasInactiveGoalContextContract,
 } from "./goal-contract.js";
 import { appendGoalPromptMarker, extractContinuationMarker, extractGoalPromptMarker } from "./markers.js";
 import {
@@ -24,6 +22,7 @@ export { queueGoalSafetyReset, resetGoalSafetyEpoch } from "./safety.js";
 
 import { DEFAULT_GOAL_SETTINGS, type GoalSettings, type GoalSettingsLoadIssue } from "./settings.js";
 import { assertGoalToolsAvailable, goalToolsAvailable } from "./tool-policy.js";
+import type { GoalToolGate } from "./tool-gate.js";
 import { type GoalWait, GoalWaitTimer } from "./wait.js";
 import { WorkflowMutex, type WorkflowMutexOwner } from "./workflow-mutex.js";
 
@@ -198,7 +197,17 @@ const CONTRADICTORY_COMPLETION_PATTERNS = [
 export class GoalRuntime {
   settings: GoalSettings = DEFAULT_GOAL_SETTINGS;
   settingsLoadIssue?: GoalSettingsLoadIssue;
-  activeGoal?: ActiveGoal;
+  private currentGoal?: ActiveGoal;
+  private goalToolGate?: GoalToolGate;
+
+  get activeGoal(): ActiveGoal | undefined { return this.currentGoal; }
+
+  set activeGoal(goal: ActiveGoal | undefined) {
+    const wasActive = this.currentGoal?.status === "active";
+    this.currentGoal = goal;
+    if (goal?.status !== "active") this.goalToolGate?.disable();
+    else if (!wasActive && this.goalToolGate?.registered) this.goalToolGate.enable();
+  }
   /** Terminal details captured for the matching persisted-state snapshot. */
   private terminalDetails?: GoalTerminalDetails;
   private goalStateSink?: (snapshot: GoalStateSnapshot) => void;
@@ -247,8 +256,20 @@ export class GoalRuntime {
   }
 
   assertGoalToolsAvailable() {
-    assertGoalToolsAvailable(this.pi);
+    try {
+      this.goalToolGate?.enable();
+      assertGoalToolsAvailable(this.pi);
+    } catch (error) {
+      if (this.activeGoal?.status !== "active") this.goalToolGate?.disable();
+      throw error;
+    }
   }
+
+  setGoalToolGate(gate: GoalToolGate) {
+    this.goalToolGate = gate;
+  }
+
+  get goalToolsRegistered() { return this.goalToolGate?.registered === true; }
 
   bindWorkflowSession(session: object) {
     this.workflowSession = session;
@@ -681,6 +702,7 @@ export class GoalRuntime {
 
   clearBudgetWrapUp() {
     this.budgetWrapUp = undefined;
+    if (this.activeGoal?.status !== "active") this.goalToolGate?.disable();
   }
 
   setCompletionSummary(goalId: string, summary: string) {
@@ -728,6 +750,7 @@ export class GoalRuntime {
     if (this.budgetWrapUp.delivered) return true;
     this.budgetWrapUp.delivered = true;
     try {
+      this.goalToolGate?.enable(["goal_complete"]);
       this.pi.sendMessage(
         {
           customType: BUDGET_WRAP_UP_MESSAGE_TYPE,
@@ -740,6 +763,7 @@ export class GoalRuntime {
       return true;
     } catch (error) {
       this.budgetWrapUp.delivered = false;
+      if (this.activeGoal?.status !== "active") this.goalToolGate?.disable();
       notifyWhenSessionAlive(ctx, `Goal budget wrap-up failed: ${formatError(error)}`, "error");
       return false;
     }
@@ -922,8 +946,9 @@ export class GoalRuntime {
   }
 
   ensureInactiveGoalContextContract(ctx: StatusContext) {
-    const contract = this.goalContextContractForPrompt(ctx);
-    if (contract) this.pi.sendMessage(contract, { triggerTurn: false });
+    // No inactive-mode instructions are appended to an ordinary conversation.
+    // The context hook removes obsolete Goal contracts after mode exit.
+    if (!this.hasActiveBudgetWrapUp()) this.goalToolGate?.disable();
   }
 
   goalContextContractForPrompt(ctx: StatusContext, goal?: ActiveGoal) {
@@ -931,9 +956,7 @@ export class GoalRuntime {
     if (goal) {
       return hasGoalContextContract(contextEntries, goal) ? undefined : createGoalContextContract(goal);
     }
-    const hasHistory = hasGoalContextContractHistory(contextEntries) || hasGoalContextContractHistory(historyEntries);
-    if (!hasHistory || hasInactiveGoalContextContract(contextEntries)) return undefined;
-    return createInactiveGoalContextContract();
+    return undefined;
   }
 
   hasGoalContextContractHistory(ctx: StatusContext) {

@@ -12,15 +12,15 @@ https://github.com/user-attachments/assets/1d0ee87a-e0a5-4bfa-a9b9-2f9144cb905b
 
 ## Features
 
-- **7 LLM-callable tools** — `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, `TaskOutput`, `TaskStop`, `TaskExecute` — matching Claude Code's exact tool specs and descriptions
+- **4 LLM-callable tools** — `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate` — for task tracking and coordination
 - **Persistent widget** — live task list above the editor with `✔`/`◼`/`◻` status marks, task numbers (`#1`, `#2`, …), strikethrough for completed tasks, star spinner (`✳✽`) for active tasks with elapsed time and token counts. Every glyph is [configurable](CUSTOMIZING.md#task-glyphs)
 - **System-reminder injection** — periodic `<system-reminder>` nudges injected into the upcoming LLM request (via the `context` hook, transient and never persisted) when task tools haven't been used recently, or when a task is left stuck `in_progress` after a text-only turn. Shaped after Claude Code's todo reminders — an empty-list nudge or a JSON echo of the current list (capped at 10 tasks)
 - **Prompt guidelines** — workflow contract encoded in tool descriptions, nudging the LLM at the point of tool use
 - **Dependency management** — bidirectional `blocks`/`blockedBy` relationships with warnings for cycles, self-deps, and dangling references
 - **Shared task lists** — multiple pi sessions can share a file-backed task list for agent team coordination
 - **File locking** — concurrent access is safe when multiple sessions share a task list
-- **Background process tracking** — track spawned processes with output buffering, blocking wait, and graceful stop
-- **Subagent integration** — tasks with `agentType` can be executed as subagents via `TaskExecute` (requires [@tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents)). Auto-cascade mode flows through the task DAG automatically when enabled.
+
+The local build tracks work only. The main agent or another extension performs the work and updates task status explicitly. Existing task data and metadata are preserved.
 
 ## Install
 
@@ -98,7 +98,6 @@ Create a structured task. Used proactively for complex multi-step work.
 | `subject` | string | yes | Brief imperative title |
 | `description` | string | yes | Detailed context and acceptance criteria |
 | `activeForm` | string | no | Present continuous form for spinner (e.g., "Running tests") |
-| `agentType` | string | no | Agent type for subagent execution (e.g., `"general-purpose"`, `"Explore"`) |
 | `metadata` | object | no | Arbitrary key-value pairs |
 
 ```
@@ -160,43 +159,6 @@ Setting `status: "deleted"` permanently removes the task.
 
 Dependencies are bidirectional: `addBlocks: ["3"]` on task 1 also adds `blockedBy: ["1"]` to task 3.
 
-### `TaskOutput`
-
-Retrieve output from a background task process.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `task_id` | string | — | Task ID or agent ID (required) |
-| `block` | boolean | `true` | Wait for completion |
-| `timeout` | number | `30000` | Max wait time in ms (max 600000) |
-
-Both task IDs and agent IDs (including partial prefixes) are accepted — agent IDs are resolved via the internal `agentTaskMap`.
-
-For a subagent task that has finished, the tool returns the agent's stored result (or its error) under the status line, so joining a task and reading what it produced is one call. Doing so also [consumes the result](#joining-a-subagent).
-
-### `TaskStop`
-
-Stop a running background task process. Sends SIGTERM, waits 5 seconds, then SIGKILL. For subagent tasks, sends a stop RPC.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `task_id` | string | Task ID or agent ID to stop |
-
-### `TaskExecute`
-
-Execute one or more tasks as background subagents. Requires [@tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents).
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `task_ids` | string[] | Task IDs to execute (required) |
-| `additional_context` | string | Extra context appended to each agent's prompt |
-| `model` | string | Model override (e.g., `"sonnet"`, `"haiku"`) |
-| `max_turns` | number | Max turns per agent |
-
-Tasks must be `pending`, have `agentType` set, and all `blockedBy` dependencies `completed`. Each task spawns as an independent background subagent.
-
-With **auto-cascade** enabled (via `/tasks` → Settings), completed tasks automatically trigger execution of their unblocked dependents — flowing through the DAG like a build system. Each cascaded agent receives its prerequisites' stored results in the prompt, so it can build directly on what came before without re-fetching.
-
 ## Task Lifecycle
 
 ```
@@ -257,17 +219,17 @@ Both auto-clear modes use a turn-based delay for non-jarring UX — tasks linger
 
 In either mode, a list with nothing left to do is also retired when a *later* batch of work begins, however long it has been sitting there. The turn delay only runs while the conversation does, so a list completed just before the agent stopped would otherwise still be on screen when the next task arrived, and that task would join it. The finished list stays visible while you read it and through any follow-up question, and goes when the agent starts new work. Tasks the agent adds to a list it is still working through are unaffected, and task IDs stay monotonic and are never reused.
 
-Settings (`taskScope`, `autoCascade`, `autoClearCompleted`, plus the [widget display settings](#widget-display-settings) `sortOrder` / `collapseCompleted` / `maxVisible` / `showAll` / `hiddenAt`) changed through `/tasks` are saved as project overrides in `<workspace>/.pi/tasks-config.json`. `glyphs` is config-file only — see [CUSTOMIZING.md](CUSTOMIZING.md#task-glyphs).
+Settings (`taskScope`, `autoClearCompleted`, plus the [widget display settings](#widget-display-settings) `sortOrder` / `collapseCompleted` / `maxVisible` / `showAll` / `hiddenAt`) changed through `/tasks` are saved as project overrides in `<workspace>/.pi/tasks-config.json`. `glyphs` is config-file only — see [CUSTOMIZING.md](CUSTOMIZING.md#task-glyphs).
 
 ### Global defaults
 
 Put settings that should apply across projects in `<agent-dir>/tasks-config.json` (`~/.pi/agent/tasks-config.json` by default). The agent directory follows pi's configured agent path. Project settings in `<workspace>/.pi/tasks-config.json` take precedence key by key.
 
-For example, enable auto-cascade by default for every project:
+For example, collapse completed tasks by default for every project:
 
 ```json
 {
-  "autoCascade": true
+  "collapseCompleted": true
 }
 ```
 
@@ -284,7 +246,6 @@ See [Customizing the task widget](CUSTOMIZING.md#where-config-lives) for worked 
 | `PI_TASKS` | `/abs/path/tasks.json` | Explicit absolute file path |
 | `PI_TASKS` | `./tasks.json` | Relative path resolved from the session workspace |
 | *(unset)* | | Uses `taskScope` setting (default: `session`) |
-| `PI_TASKS_DEBUG` | `1` | Trace RPC communication (request/reply/timeout) and spawn errors to stderr |
 
 Named and explicit paths use a file-locked store with stale-lock detection — safe for multiple pi sessions coordinating on the same task list.
 
@@ -315,78 +276,14 @@ Tasks
 - **Create task** — input prompts for subject and description
 - **Clear completed** — remove all completed tasks
 - **Clear all** — remove all tasks regardless of status
-- **Settings** — configure project overrides for task storage, auto-cascade, auto-clear completed tasks, and [widget display](#widget-display-settings) (sort order, max visible, show all, hidden position)
-
-## Cross-extension Communication with [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents)
-
-[`pi-tasks`](https://github.com/tintinweb/pi-tasks) communicates with [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) via pi's eventbus using a scoped request/reply RPC protocol. No shared global state — just events.
-
-### Presence Detection
-
-Load order doesn't matter. Two handshake paths ensure detection regardless of which extension loads first:
-
-1. **Ping on init** — [`pi-tasks`](https://github.com/tintinweb/pi-tasks) emits `subagents:rpc:ping` with a unique `requestId` and listens for `subagents:rpc:ping:reply:{requestId}`. If [`pi-subagents`](https://github.com/tintinweb/pi-subagents) is already loaded, it replies immediately.
-2. **Ready broadcast** — [`pi-subagents`](https://github.com/tintinweb/pi-subagents) emits `subagents:ready` when it initializes. If [`pi-tasks`](https://github.com/tintinweb/pi-tasks) loaded first, it picks this up.
-
-```
-┌─────────────┐                    ┌──────────────────┐
-│  pi-tasks   │                    │  pi-subagents    │
-└──────┬──────┘                    └────────┬─────────┘
-       │                                    │
-       │──── subagents:rpc:ping ───────────▶│
-       │◀─── subagents:rpc:ping:reply ──────│
-       │                                    │
-       │◀─── subagents:ready ───────────────│  (broadcast on init)
-       │                                    │
-```
-
-### Spawning Subagents
-
-When `TaskExecute` runs, it sends a spawn RPC with a scoped reply channel:
-
-```
-pi-tasks                                pi-subagents
-   │                                         │
-   │── subagents:rpc:spawn ─────────────────▶│  { requestId, type, prompt, options }
-   │◀─ subagents:rpc:spawn:reply:{reqId} ───│  { id }  (or { error })
-   │                                         │
-```
-
-The returned `id` is stored in an in-memory `agentTaskMap` (agentId → taskId) for O(1) completion lookup. A 30-second timeout rejects the Promise if no reply arrives.
-
-### Lifecycle Events
-
-[`pi-subagents`](https://github.com/tintinweb/pi-subagents) emits lifecycle events that [`pi-tasks`](https://github.com/tintinweb/pi-tasks) listens to:
-
-| Event | Payload | Action |
-|-------|---------|--------|
-| `subagents:completed` | `{ id, result? }` | Mark task `completed`, trigger auto-cascade if enabled |
-| `subagents:failed` | `{ id, error?, status }` | Revert task to `pending`, store error in metadata |
-
-### Joining a Subagent
-
-`TaskOutput` waits on those same lifecycle events and then returns the stored result. Handing it to the model *consumes* it: pi-tasks says so over the bus, and pi-subagents drops the completion notification it was holding for that agent, which would otherwise arrive after the model had already answered and cost a turn to dismiss.
-
-```
-pi-tasks                                pi-subagents
-   │                                         │
-   │◀─ subagents:completed ─────────────────│  { id, result }
-   │── subagents:rpc:consume ───────────────▶│  { requestId, agentId }
-   │                                         │
-```
-
-Fire-and-forget, and deliberately outside the version handshake — a [`pi-subagents`](https://github.com/tintinweb/pi-subagents) without the handler keeps notifying, exactly as before. An agent that is still running is never consumed: nothing has been read from it yet, and its notification is the only thing that will announce it.
-
-### Standalone Mode
-
-If [`pi-subagents`](https://github.com/tintinweb/pi-subagents) is not installed, everything works except `TaskExecute`, which returns a friendly message explaining the agent can fall back to plain Agent-tool spawns — with the caveat that pi-tasks won't track those (status stays `pending`, auto-cascade won't fire, `TaskOutput` stays empty). All core task tools (create, list, get, update, dependencies, widget, system-reminder injection) function independently.
+- **Settings** — configure project overrides for task storage, auto-clear completed tasks, and [widget display](#widget-display-settings) (sort order, max visible, show all, hidden position)
 
 ## Architecture
 
 ```
 src/
-├── index.ts            # Extension entry: 7 tools + /tasks command + widget + subagent integration
-├── types.ts            # Task, TaskStatus, BackgroundProcess types
+├── index.ts            # Extension entry: 4 task tools + /tasks command + widget
+├── types.ts            # Task and TaskStatus types
 ├── task-store.ts       # File-backed store with CRUD, dependencies, locking
 ├── auto-clear.ts       # Turn-based auto-clearing of completed tasks (AutoClearManager)
 ├── tasks-config.ts     # Global defaults and project override persistence
@@ -394,15 +291,10 @@ src/
 ├── task-glyphs.ts      # Glyph defaults and config validation
 ├── task-sort.ts        # Widget ordering: sort presets and sort specs
 ├── reminder-cadence.ts # Pure cadence logic for system-reminder injection
-├── process-tracker.ts  # Background process output buffering and stop
 └── ui/
     ├── task-widget.ts  # Persistent widget with status glyphs and spinner
     └── settings-menu.ts  # /tasks → Settings panel (SettingsList TUI component)
 ```
-
-## Future Work
-
-- **Background Bash auto-task creation** — Claude Code auto-creates tasks when `Bash` runs with `run_in_background: true`. Pi's bash tool currently lacks a `run_in_background` parameter (only `command` + `timeout`), so there's nothing to hook into. Once pi adds background execution support to its bash tool, we can use the `tool_call` event to detect it and auto-create tasks via `TaskStore`/`ProcessTracker`.
 
 ## Development
 

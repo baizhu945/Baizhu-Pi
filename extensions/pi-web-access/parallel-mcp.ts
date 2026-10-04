@@ -1,13 +1,80 @@
 import { activityMonitor } from "./activity.ts";
-import { redactCredential } from "./credential-source.ts";
+import { redactCredential, resolveCredential } from "./credential-source.ts";
+import { existsSync, readFileSync } from "node:fs";
 import type { ExtractedContent, ExtractOptions } from "./extract.ts";
-import { resolveParallelApiKey } from "./parallel.ts";
-import type { SearchOptions, SearchResponse } from "./perplexity.ts";
+import type { SearchOptions, SearchResponse } from "./search-types.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 
 const PARALLEL_MCP_URL = "https://search.parallel.ai/mcp";
 const CONFIG_PATH = getWebSearchConfigPath();
 const REQUEST_TIMEOUT_MS = 60_000;
+
+const MIN_PARALLEL_API_KEY_LENGTH = 8;
+
+const PLACEHOLDER_API_KEY_DENYLIST = new Set([
+	"replace_with_your_parallel_api_key",
+	"parallel_api_key",
+	"your-key",
+	"your-key-here",
+	"your-api-key-here",
+	"dummy",
+	"placeholder",
+	"changeme",
+	"insert-your-key",
+	"insert-your-key-here",
+	"api-key",
+	"xxx",
+]);
+
+
+interface WebSearchConfig { parallelApiKey?: unknown; }
+let cachedConfig: WebSearchConfig | null = null;
+function loadConfig(): WebSearchConfig {
+	if (cachedConfig) return cachedConfig;
+	if (!existsSync(CONFIG_PATH)) {
+		cachedConfig = {};
+		return cachedConfig;
+	}
+
+	const raw = readFileSync(CONFIG_PATH, "utf-8");
+	try {
+		cachedConfig = JSON.parse(raw) as WebSearchConfig;
+		return cachedConfig;
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
+	}
+}
+
+function normalizeApiKey(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	const normalized = value.trim();
+	return normalized.length > 0 ? normalized : null;
+}
+
+function isPlaceholderApiKey(key: string): boolean {
+	const normalized = key.trim();
+	return normalized.length < MIN_PARALLEL_API_KEY_LENGTH || PLACEHOLDER_API_KEY_DENYLIST.has(normalized.toLowerCase());
+}
+
+export async function resolveParallelApiKey(signal?: AbortSignal): Promise<string | null> {
+	const configKey = normalizeApiKey(loadConfig().parallelApiKey);
+	if (configKey?.startsWith("$") || configKey?.startsWith("!")) {
+		const resolved = await resolveCredential({
+			provider: "Parallel",
+			configuredValue: configKey,
+			environmentValue: process.env.PARALLEL_API_KEY,
+			signal,
+		});
+		return resolved && !isPlaceholderApiKey(resolved) ? resolved : null;
+	}
+
+	const envKey = normalizeApiKey(process.env.PARALLEL_API_KEY);
+	if (envKey && !isPlaceholderApiKey(envKey)) return envKey;
+	if (configKey && !isPlaceholderApiKey(configKey)) return configKey;
+	return null;
+}
+
 
 interface ParallelMcpResult {
 	content?: Array<{ type?: string; text?: string }>;

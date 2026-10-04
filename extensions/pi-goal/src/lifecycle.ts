@@ -5,7 +5,6 @@ import {
   GOAL_CONTRACT_MESSAGE_TYPE,
   isGoalContextContract,
   reconcileGoalContextContract,
-  reconcileInactiveGoalContextContract,
 } from "./goal-contract.js";
 import { type ActiveGoal, loadGoalStateFromSession } from "./persistence.js";
 import type { GoalRunController } from "./run-protocol.js";
@@ -107,7 +106,9 @@ export function registerGoalLifecycle(
       if (runtime.enforceAutomaticTurnLimit(ctx, false) || runtime.enforceNoProgressLimit(ctx)) {
         return;
       }
-      if (!runtime.goalToolsAvailable()) {
+      try {
+        runtime.assertGoalToolsAvailable();
+      } catch {
         runtime.pauseGoalForUnavailableTools(ctx, false);
         return;
       }
@@ -321,14 +322,10 @@ export function registerGoalLifecycle(
   pi.on("context", (event, ctx) => {
     if (!sessionActive) return;
     const keptMessages = event.messages.filter((message) => runtime.keepBudgetWrapUpMessage(message));
-    const hasGoalContractHistory =
-      keptMessages.some(isGoalContextContract) || runtime.hasGoalContextContractHistory(ctx);
     const messages =
       runtime.activeGoal?.status === "active" && runtime.ownsWorkflow(runtime.activeGoal)
         ? reconcileGoalContextContract(keptMessages, runtime.activeGoal)
-        : hasGoalContractHistory
-          ? reconcileInactiveGoalContextContract(keptMessages)
-          : keptMessages;
+        : keptMessages.filter(message => !isGoalContextContract(message));
     if (runtime.activeGoal?.status === "paused" && runtime.guardAbortGoalId === runtime.activeGoal.id) {
       // A current custom follow-up clears the guard at message_start. Otherwise,
       // context transformation aborts before the provider adapter receives the signal.

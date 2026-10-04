@@ -47,15 +47,6 @@ export async function openSettingsMenu(
         values: ["memory", "session", "session-global", "project"],
       },
       {
-        id: "autoCascade",
-        label: "Auto-cascade agent tasks",
-        description:
-          "When ON: pending agent tasks start automatically once their dependencies complete. " +
-          "When OFF: use TaskExecute to launch them manually.",
-        currentValue: (cfg.autoCascade ?? false) ? "on" : "off",
-        values: ["on", "off"],
-      },
-      {
         id: "collapseCompleted",
         label: "Collapse completed tasks",
         description:
@@ -121,10 +112,6 @@ export async function openSettingsMenu(
       /* maxVisible */ 10,
       getSettingsListTheme(),
       /* onChange */ (id, newValue) => {
-        if (id === "autoCascade") {
-          cfg.autoCascade = newValue === "on";
-          saveTasksConfig(cfg, cwd);
-        }
         if (id === "taskScope") {
           cfg.taskScope = newValue as TasksConfig["taskScope"];
           saveTasksConfig(cfg, cwd);

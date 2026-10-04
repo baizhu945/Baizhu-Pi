@@ -28,9 +28,15 @@ assert.deepEqual(loaded.warnings ?? [], []);
 assert.equal(loaded.extensions.length, 1);
 const extension = loaded.extensions[0];
 assert.deepEqual([...extension.tools.keys()].sort(), [
-  "TaskCreate", "TaskExecute", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate",
+  "TaskCreate", "TaskGet", "TaskList", "TaskUpdate",
 ]);
 assert(extension.commands.has("tasks"));
+for (const { definition } of extension.tools.values()) {
+  assert.doesNotMatch(JSON.stringify({ description: definition.description, promptSnippet: definition.promptSnippet,
+    promptGuidelines: definition.promptGuidelines, parameters: definition.parameters }), /TaskExecute|TaskOutput|TaskStop/);
+}
+assert(!('agentType' in extension.tools.get('TaskCreate').definition.parameters.properties));
+assert.equal([...extension.handlers.keys()].some(name => name.startsWith('subagents:')), false);
 const context = { cwd: scratch, ui: { setWidget() {}, setStatus() {}, notify() {} } };
 const execute = (name, params) => extension.tools.get(name).definition.execute(
   "host-loader-check", params, undefined, undefined, context,
@@ -40,4 +46,4 @@ assert.match(created.content[0].text, /Task #1 created/);
 assert.match((await execute("TaskList", {})).content[0].text, /Host loader check/);
 await execute("TaskUpdate", { taskId: "1", status: "completed" });
 assert.match((await execute("TaskGet", { taskId: "1" })).content[0].text, /completed/);
-console.log("Pi host loader: zero errors/warnings; all 7 tools and /tasks registered; task CRUD passed.");
+console.log("Pi host loader: zero errors/warnings; all 4 tools and /tasks registered; task CRUD passed.");

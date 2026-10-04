@@ -16,5 +16,7 @@
       source = ./extensions/session-picker;
       recursive = true;
     };
+
+    ".pi/agent/extensions/background-commands.ts".source = ./extensions/background-commands.ts;
   };
 }

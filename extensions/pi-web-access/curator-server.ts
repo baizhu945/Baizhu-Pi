@@ -277,38 +277,17 @@ export function startCuratorServer(
 	function isAvailableProvider(provider: string): boolean {
 		if (provider === "all") return availableProviders.all;
 		if (provider === "openai") return availableProviders.openai;
-		if (provider === "brave") return availableProviders.brave;
-		if (provider === "parallel") return availableProviders.parallel;
 		if (provider === "parallel-mcp") return availableProviders["parallel-mcp"];
-		if (provider === "tinyfish") return availableProviders.tinyfish;
-		if (provider === "search1api") return availableProviders.search1api;
-		if (provider === "searchinfinity") return availableProviders.searchinfinity;
-		if (provider === "querit") return availableProviders.querit;
-		if (provider === "tavily") return availableProviders.tavily;
 		if (provider === "firecrawl") return availableProviders.firecrawl;
-		if (provider === "jina") return availableProviders.jina;
-		if (provider === "serpdive") return availableProviders.serpdive;
-		if (provider === "kagi") return availableProviders.kagi;
-		if (provider === "bocha") return availableProviders.bocha;
-		if (provider === "ollama") return availableProviders.ollama;
 		if (provider === "searxng") return availableProviders.searxng;
 		if (provider === "duckduckgo") return availableProviders.duckduckgo;
-		if (provider === "perplexity") return availableProviders.perplexity;
 		if (provider === "exa") return availableProviders.exa;
 		if (provider === "gemini") return availableProviders.gemini;
 		if (provider === "kimi") return availableProviders.kimi;
 		if (provider === "anysearch") return availableProviders.anysearch;
-		if (provider === "xcrawl") return availableProviders.xcrawl;
 		if (provider === "xai") return availableProviders.xai;
-		if (provider === "mistral") return availableProviders.mistral;
-		if (provider === "brightdata") return availableProviders.brightdata;
-		if (provider === "serpbase") return availableProviders.serpbase;
-		if (provider === "serper") return availableProviders.serper;
-		if (provider === "serply") return availableProviders.serply;
-		if (provider === "you") return availableProviders.you;
 		if (provider === "baizhi") return availableProviders.baizhi;
 		if (provider === "zai") return availableProviders.zai;
-		if (provider === "valyu") return availableProviders.valyu;
 		return false;
 	}
 

@@ -18,38 +18,16 @@ function buildProviderButtons(
 		{ value: "all", label: "All", available: available.all },
 		{ value: "openai", label: "OpenAI", available: available.openai },
 		{ value: "exa", label: "Exa", available: available.exa },
-		{ value: "brave", label: "Brave", available: available.brave },
-		{ value: "parallel", label: "Parallel", available: available.parallel },
 		{ value: "parallel-mcp", label: "Parallel MCP", available: available["parallel-mcp"] },
-		{ value: "tinyfish", label: "TinyFish", available: available.tinyfish },
-		{ value: "search1api", label: "Search1API", available: available.search1api },
-		{ value: "searchinfinity", label: "Searchinfinity", available: available.searchinfinity },
-		{ value: "querit", label: "Querit", available: available.querit },
-		{ value: "tavily", label: "Tavily", available: available.tavily },
 		{ value: "firecrawl", label: "Firecrawl", available: available.firecrawl },
-		{ value: "jina", label: "Jina", available: available.jina },
-		{ value: "serpdive", label: "SERPdive", available: available.serpdive },
-		{ value: "kagi", label: "Kagi", available: available.kagi },
-		{ value: "bocha", label: "Bocha", available: available.bocha },
-		{ value: "ollama", label: "Ollama", available: available.ollama },
 		{ value: "searxng", label: "SearXNG", available: available.searxng },
 		{ value: "duckduckgo", label: "DuckDuckGo", available: available.duckduckgo },
-		{ value: "perplexity", label: "Perplexity", available: available.perplexity },
 		{ value: "gemini", label: "Gemini", available: available.gemini },
 		{ value: "kimi", label: "Kimi", available: available.kimi },
 		{ value: "anysearch", label: "AnySearch", available: available.anysearch },
-		{ value: "xcrawl", label: "XCrawl", available: available.xcrawl },
 		{ value: "xai", label: "xAI", available: available.xai },
-		{ value: "mistral", label: "Mistral", available: available.mistral },
-		{ value: "brightdata", label: "Bright Data", available: available.brightdata },
-		{ value: "serpbase", label: "SerpBase", available: available.serpbase },
-		{ value: "serpapi", label: "SerpApi", available: available.serpapi },
-		{ value: "serper", label: "Serper", available: available.serper },
-		{ value: "serply", label: "Serply", available: available.serply },
-		{ value: "you", label: "You.com", available: available.you },
 		{ value: "baizhi", label: "Baizhi", available: available.baizhi },
 		{ value: "zai", label: "Z.ai", available: available.zai },
-		{ value: "valyu", label: "Valyu", available: available.valyu },
 	];
 
 	return providers
@@ -672,11 +650,6 @@ main {
   background: rgba(141, 211, 255, 0.14);
   border-color: rgba(141, 211, 255, 0.3);
 }
-.provider-tag.provider-perplexity {
-  color: #cba6f7;
-  background: rgba(203, 166, 247, 0.14);
-  border-color: rgba(203, 166, 247, 0.3);
-}
 .provider-tag.provider-gemini {
   color: #f5c27b;
   background: rgba(245, 194, 123, 0.14);
@@ -687,11 +660,6 @@ main {
   background: rgba(249, 199, 79, 0.14);
   border-color: rgba(249, 199, 79, 0.3);
 }
-.provider-tag.provider-xcrawl {
-  color: #7dd3ae;
-  background: rgba(125, 211, 174, 0.14);
-  border-color: rgba(125, 211, 174, 0.3);
-}
 .provider-tag.provider-xai {
   color: #c4b5fd;
   background: rgba(196, 181, 253, 0.14);
@@ -701,56 +669,6 @@ main {
   color: #a6e3a1;
   background: rgba(166, 227, 161, 0.14);
   border-color: rgba(166, 227, 161, 0.3);
-}
-.provider-tag.provider-brave {
-  color: #f38ba8;
-  background: rgba(243, 139, 168, 0.14);
-  border-color: rgba(243, 139, 168, 0.3);
-}
-.provider-tag.provider-parallel {
-  color: #89dceb;
-  background: rgba(137, 220, 235, 0.14);
-  border-color: rgba(137, 220, 235, 0.3);
-}
-.provider-tag.provider-tinyfish {
-  color: #74c7ec;
-  background: rgba(116, 199, 236, 0.14);
-  border-color: rgba(116, 199, 236, 0.3);
-}
-.provider-tag.provider-search1api {
-  color: #89b4fa;
-  background: rgba(137, 180, 250, 0.14);
-  border-color: rgba(137, 180, 250, 0.3);
-}
-.provider-tag.provider-searchinfinity {
-  color: #f9e2af;
-  background: rgba(249, 226, 175, 0.14);
-  border-color: rgba(249, 226, 175, 0.3);
-}
-.provider-tag.provider-querit {
-  color: #a6e3a1;
-  background: rgba(166, 227, 161, 0.14);
-  border-color: rgba(166, 227, 161, 0.3);
-}
-.provider-tag.provider-tavily {
-  color: #a6e3a1;
-  background: rgba(166, 227, 161, 0.14);
-  border-color: rgba(166, 227, 161, 0.3);
-}
-.provider-tag.provider-jina {
-  color: #f9e2af;
-  background: rgba(249, 226, 175, 0.14);
-  border-color: rgba(249, 226, 175, 0.3);
-}
-.provider-tag.provider-serpdive {
-  color: #94e2d5;
-  background: rgba(148, 226, 213, 0.14);
-  border-color: rgba(148, 226, 213, 0.3);
-}
-.provider-tag.provider-brightdata {
-  color: #b4befe;
-  background: rgba(180, 190, 254, 0.14);
-  border-color: rgba(180, 190, 254, 0.3);
 }
 .provider-tag.provider-unknown {
   color: var(--fg-muted);
@@ -1476,7 +1394,7 @@ const SCRIPT = `(function() {
   var token = DATA.sessionToken;
   var timeoutSec = DATA.timeout;
   var queries = Array.isArray(DATA.queries) ? DATA.queries : [];
-  var providers = ["auto", "all", "openai", "exa", "brave", "parallel", "parallel-mcp", "tinyfish", "search1api", "searchinfinity", "querit", "tavily", "firecrawl", "jina", "serpdive", "kagi", "bocha", "ollama", "searxng", "duckduckgo", "perplexity", "gemini", "kimi", "anysearch", "xcrawl", "xai", "mistral", "brightdata", "serpbase", "serpapi", "serper", "serply", "valyu", "baizhi", "you", "zai"];
+  var providers = ["auto","all","openai","parallel-mcp","firecrawl","searxng","duckduckgo","gemini","kimi","exa","anysearch","xai","baizhi","zai"];
   var availProviders = DATA.availableProviders && typeof DATA.availableProviders === "object" ? DATA.availableProviders : {};
   var workflow = "summary-review";
   var initialDefaultProvider = typeof DATA.defaultProvider === "string" ? DATA.defaultProvider : "exa";
@@ -1683,38 +1601,16 @@ const SCRIPT = `(function() {
     if (provider === "auto") return "Auto";
     if (provider === "all") return "All";
     if (provider === "openai") return "OpenAI";
-    if (provider === "brave") return "Brave";
-    if (provider === "parallel") return "Parallel";
-    if (provider === "tinyfish") return "TinyFish";
-    if (provider === "search1api") return "Search1API";
-    if (provider === "searchinfinity") return "Searchinfinity";
-    if (provider === "querit") return "Querit";
-    if (provider === "tavily") return "Tavily";
     if (provider === "firecrawl") return "Firecrawl";
-    if (provider === "jina") return "Jina";
-    if (provider === "serpdive") return "SERPdive";
-    if (provider === "kagi") return "Kagi";
-    if (provider === "bocha") return "Bocha";
-    if (provider === "ollama") return "Ollama";
     if (provider === "searxng") return "SearXNG";
     if (provider === "duckduckgo") return "DuckDuckGo";
-    if (provider === "perplexity") return "Perplexity";
     if (provider === "exa") return "Exa";
     if (provider === "gemini") return "Gemini";
     if (provider === "kimi") return "Kimi";
     if (provider === "anysearch") return "AnySearch";
-    if (provider === "xcrawl") return "XCrawl";
     if (provider === "xai") return "xAI";
-    if (provider === "mistral") return "Mistral";
-    if (provider === "brightdata") return "Bright Data";
-    if (provider === "serpbase") return "SerpBase";
-    if (provider === "serpapi") return "SerpApi";
-    if (provider === "serper") return "Serper";
-    if (provider === "serply") return "Serply";
-    if (provider === "you") return "You.com";
     if (provider === "baizhi") return "Baizhi";
     if (provider === "zai") return "Z.ai";
-    if (provider === "valyu") return "Valyu";
     return "Unknown";
   }
 

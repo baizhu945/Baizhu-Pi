@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **Task execution tools:** remove TaskExecute, TaskOutput and TaskStop, their subagent RPC/lifecycle integration, auto-cascade settings and unused process tracking. Keep four task management tools and remove execution instructions from their prompts.
+
 ### Fixed
 - **Local Pi 0.99.2 deployment:** declare Pi SDK, TUI and TypeBox as `"*"` peer dependencies and deploy source through Home Manager without bundled host modules. Nix checks the full test suite against the installed Pi SDK and removes the legacy npm package during activation.
 

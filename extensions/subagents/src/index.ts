@@ -292,8 +292,16 @@ export default function (pi: ExtensionAPI) {
 
       const all = [d, ...(d.others ?? [])];
       const groupIsError = all.some(a => a.status === "error" || a.status === "stopped" || a.status === "aborted");
+      // Each task envelope already contains its complete result. Match it by
+      // ID so expanded rows show their own payload, including old saved batches.
+      const taskPayloads = new Map<string, string>();
+      if (expanded) {
+        for (const match of payload.matchAll(/<task\b[^>]*\bid="([^"]+)"[^>]*>[\s\S]*?<\/task>/g)) {
+          taskPayloads.set(match[1], match[0]);
+        }
+      }
 
-      function renderOne(d: NotificationDetails, includePayload: boolean): string {
+      function renderOne(d: NotificationDetails): string {
         const isError = d.status === "error" || d.status === "stopped" || d.status === "aborted";
         const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
         const statusText = isError ? d.status
@@ -319,16 +327,10 @@ export default function (pi: ExtensionAPI) {
           line += "\n  " + parts.map(p => theme.fg("dim", p)).join(" " + theme.fg("dim", "·") + " ");
         }
 
-        if (expanded && includePayload) {
-          // Render the complete model-facing message, not a transcript path or
-          // an abbreviated preview. This is what Ctrl+O on a normal tool row
-          // does for its full result. A grouped notification has one payload;
-          // render it once instead of duplicating it for every row.
-          const lines = payload.split("\n");
+        if (expanded) {
+          // Preserve the full original content for legacy/unrecognized formats.
+          const lines = (taskPayloads.get(d.id) ?? payload).split("\n");
           for (const l of lines) line += "\n" + theme.fg("toolOutput", `  ${l}`);
-        } else if (expanded) {
-          // The first row already displayed the exact grouped payload.
-          line += "\n  " + theme.fg("toolOutput", `⎿  ${d.resultPreview?.split("\n")[0]?.slice(0, 80) ?? ""}`);
         } else {
           const preview = d.resultPreview?.split("\n")[0]?.slice(0, 80) ?? "";
           line += "\n  " + theme.fg("toolOutput", `⎿  ${preview}`);
@@ -338,7 +340,7 @@ export default function (pi: ExtensionAPI) {
         return line;
       }
 
-      const rendered = all.map((agent, index) => renderOne(agent, index === 0));
+      const rendered = all.map(agent => renderOne(agent));
       // A group of agents lands as one notification, and the number a user wants
       // from it is what the batch cost — not four figures to add up by hand.
       // Derived from the per-agent details rather than carried alongside them:

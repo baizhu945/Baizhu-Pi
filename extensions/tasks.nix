@@ -6,7 +6,7 @@ let
 
   piTasksLocal = pkgs.stdenvNoCC.mkDerivation {
     pname = "pi-tasks-local";
-    version = "0.9.0-local.1";
+    version = "0.9.0-local.2";
     src = ./tasks;
     nativeCheckInputs = [ pkgs.nodejs pkgs.typescript ];
     dontConfigure = true;
@@ -14,16 +14,16 @@ let
     doCheck = true;
     checkPhase = ''
       runHook preCheck
-      export HOME="$TMPDIR/tasks-check-home"
+      export PI_CODING_AGENT_DIR="$TMPDIR/tasks-check-agent"
       export PI_OFFLINE=1
-      mkdir -p "$HOME" node_modules/@earendil-works
+      mkdir -p "$PI_CODING_AGENT_DIR" node_modules/@earendil-works
       # Test tools are fetched by Nix. SDK and TypeBox always come from Pi.
       cp -R ${testModules}/. node_modules/
       chmod -R u+w node_modules
       ln -s ${piPackageDir} node_modules/@earendil-works/pi-coding-agent
       ln -s ${piPackageDir}/node_modules/@earendil-works/pi-tui node_modules/@earendil-works/pi-tui
       ln -s ${piPackageDir}/node_modules/typebox node_modules/typebox
-      ln -s ${piPackageDir}/node_modules/@types node_modules/@types
+      ln -s ${piPackageDir}/node_modules/@types/node node_modules/@types/node
       node node_modules/@biomejs/biome/bin/biome check src/ test/ --error-on-warnings
       tsc --noEmit -p tsconfig.json
       node node_modules/vitest/vitest.mjs run --reporter=dot

@@ -23,3 +23,12 @@ task creation, listing and completion without contacting a model.
 
 The activation removes the legacy npm package. Task data and settings are
 preserved.
+
+The local.2 revision registers only TaskCreate, TaskList, TaskGet and TaskUpdate.
+It tracks requirements, statuses, owners, dependencies and arbitrary metadata;
+execution is performed by the main agent or another extension. Subagent RPC,
+background output/stop tools, auto-cascade and the unused process tracker have
+been removed. TaskCreate no longer has an agentType parameter. Task data is
+preserved, including any older metadata, but no longer drives subagent execution.
+Nix checks the remaining test suite and verifies all four deployed tool schemas
+and prompts through Pi's real extension loader.

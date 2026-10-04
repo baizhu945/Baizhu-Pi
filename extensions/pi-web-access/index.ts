@@ -5,14 +5,13 @@ import pLimit from "p-limit";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai/compat";
 import type { ExtractedContent, ExtractOptions } from "./extract.ts";
 import { normalizeFetchContentParams } from "./fetch-params.ts";
-import { resolveAuthFetchProfile, type AuthFetchProfile } from "./auth-fetch.ts";
 import { findContent, type FindMode } from "./content-find.ts";
 import { answerFromPage } from "./page-query.ts";
 import { rewriteSearchQuery } from "./query-rewrite.ts";
 import { clearCloneCache } from "./github-extract.ts";
 import { ALL_SEARCH_PROVIDERS, assertSearchProviderSelectionAllowed, getAllowedSearchProviders, getConfiguredSearchRouting, normalizeSearchProviderSelection, providerLabel, RESOLVED_SEARCH_PROVIDERS, search, type AttributedSearchResponse, type ProviderAvailability, type SearchProvider, type SearchProviderSelection, type ResolvedSearchProvider } from "./gemini-search.ts";
 export type { ProviderAvailability } from "./gemini-search.ts";
-import type { SearchResult } from "./perplexity.ts";
+import type { SearchResult } from "./search-types.ts";
 import { formatSeconds, getWebSearchConfigDir, getWebSearchConfigPath, resolveCuratorNetworkConfig, runWithProxy } from "./utils.ts";
 import {
 	clearResults,
@@ -41,42 +40,18 @@ import { createRequire } from "node:module";
 import { platform } from "node:os";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { isPerplexityAvailable } from "./perplexity.ts";
 import { isExaAvailable } from "./exa.ts";
 import { isGeminiApiAvailable } from "./gemini-api.ts";
-import { getActiveGoogleEmail, getGeminiWebAvailabilityDiagnostic, getGeminiWebAvailabilityDiagnosticDetails, isGeminiWebAvailable } from "./gemini-web.ts";
-import { isBrowserCookieAccessAllowed } from "./gemini-web-config.ts";
-import { isBraveAvailable } from "./brave.ts";
 import { isCurrentModelHostedSearchEligible, isOpenAISearchAvailable, isOpenAISubscriptionModelSelected } from "./openai-search.ts";
-import { isParallelAvailable } from "./parallel.ts";
 import { isParallelMcpAvailable } from "./parallel-mcp.ts";
-import { isTinyFishAvailable } from "./tinyfish.ts";
-import { isSearch1APIAvailable } from "./search1api.ts";
-import { isSearchinfinityAvailable } from "./searchinfinity.ts";
-import { isQueritAvailable } from "./querit.ts";
-import { isTavilyAvailable } from "./tavily.ts";
-import { isYouAvailable } from "./you.ts";
 import { isFirecrawlAvailable } from "./firecrawl.ts";
-import { isJinaSearchAvailable } from "./jina-search.ts";
-import { isSerpdiveAvailable } from "./serpdive.ts";
-import { isKagiAvailable } from "./kagi.ts";
-import { isBochaAvailable } from "./bocha.ts";
-import { isOllamaAvailable } from "./ollama.ts";
 import { isSearXNGAvailable } from "./searxng.ts";
 import { isDuckDuckGoAvailable } from "./duckduckgo.ts";
 import { isAnySearchAvailable } from "./anysearch.ts";
 import { isXaiSearchAvailable } from "./xai-search.ts";
-import { isMistralAvailable } from "./mistral-search.ts";
 import { isKimiSearchAvailable } from "./kimi-search.ts";
-import { isBrightDataAvailable } from "./brightdata.ts";
-import { isSerpBaseAvailable } from "./serpbase.ts";
-import { isSerpApiAvailable } from "./serpapi.ts";
-import { isSerperAvailable } from "./serper.ts";
-import { isSerplyAvailable } from "./serply.ts";
 import { isBaizhiAvailable } from "./baizhi.ts";
 import { isZaiAvailable } from "./zai.ts";
-import { isValyuAvailable } from "./valyu.ts";
-import { isXcrawlAvailable } from "./xcrawl.ts";
 import { buildSearchErrorPlan, type SearchErrorDetails, type SearchErrorPlan } from "./render-search-error.ts";
 import { findModelWithProviderRouting, isModelInScope, splitThinkingSuffix } from "./summary-model-scope.ts";
 import { registerCuratorRunLifecycle, resolveWebSearchWorkflow, type WebSearchWorkflow } from "./curator-run.ts";
@@ -88,7 +63,6 @@ import {
 	type RecencyFilter,
 	type ResearchArtifact,
 } from "./source-check.ts";
-import { registerWebToolActivation } from "./tool-activation.ts";
 
 // Match pi-ai's StringEnum without loading its compat barrel during registration.
 function StringEnum<T extends string[]>(values: T, options?: { description?: string; default?: T[number] }) {
@@ -150,20 +124,8 @@ function renderSearchErrorPlan(plan: SearchErrorPlan, expanded: boolean, theme: 
 
 interface WebSearchConfig {
 	anysearchApiKey?: unknown;
-	xcrawlApiKey?: unknown;
-	brightdataApiKey?: unknown;
-	brightdataSerpZone?: unknown;
-	kagiApiKey?: unknown;
-	ollamaApiKey?: unknown;
-	serpbaseApiKey?: unknown;
-	serpapiApiKey?: unknown;
-	serperApiKey?: unknown;
-	serplyApiKey?: unknown;
-	youApiKey?: unknown;
 	baizhiApiKey?: unknown;
 	zaiApiKey?: unknown;
-	tinyfishApiKey?: unknown;
-	valyuApiKey?: unknown;
 	xaiApiKey?: unknown;
 	provider?: unknown;
 	searchProvider?: unknown;
@@ -184,8 +146,7 @@ interface WebSearchConfig {
 		allowedProviders?: unknown;
 	};
 	tools?: Partial<Record<keyof ToolNames, { enabled?: boolean }>>;
-	toolActivation?: unknown;
-	commands?: Partial<Record<"websearch" | "curator" | "search" | "google-account", { enabled?: boolean }>>;
+	commands?: Partial<Record<"websearch" | "curator" | "search", { enabled?: boolean }>>;
 	toolNames?: Partial<ToolNames>;
 	shortcuts?: {
 		curate?: KeyId;
@@ -314,7 +275,7 @@ function isToolEnabled(config: WebSearchConfig, key: keyof ToolNames): boolean {
 	return key !== "webSearch" && key !== "sourceCheck" || config.webSearch?.enabled !== false;
 }
 
-function isCommandEnabled(config: WebSearchConfig, name: "websearch" | "curator" | "search" | "google-account"): boolean {
+function isCommandEnabled(config: WebSearchConfig, name: "websearch" | "curator" | "search"): boolean {
 	return config.commands?.[name]?.enabled !== false;
 }
 
@@ -345,7 +306,6 @@ function resolveToolNames(config: WebSearchConfig): ToolNames {
 	const seen = new Map<string, keyof ToolNames>();
 	for (const key of registeredKeys) {
 		const name = names[key];
-		if (name === "web_enable") throw new Error(`toolNames.${key} in ${WEB_SEARCH_CONFIG_PATH} uses reserved loader name web_enable`);
 		const previous = seen.get(name);
 		if (previous) throw new Error(`toolNames.${key} duplicates toolNames.${previous} in ${WEB_SEARCH_CONFIG_PATH}`);
 		seen.set(name, key);
@@ -472,43 +432,20 @@ function shouldAutoOpenCuratorBrowser(config: WebSearchConfig): boolean {
 
 async function getProviderAvailability(ctx: ExtensionContext): Promise<ProviderAvailability> {
 	const allowedProviders = new Set(getAllowedSearchProviders());
-	const geminiWebAvail = allowedProviders.has("gemini") ? await getOptionalGeminiWebAvailability() : null;
 	const geminiApiAvail = allowedProviders.has("gemini") && isGeminiApiAvailable();
 	const providers = {
 		openai: allowedProviders.has("openai") && await isOpenAISearchAvailable(ctx),
-		brave: allowedProviders.has("brave") && isBraveAvailable(),
-		parallel: allowedProviders.has("parallel") && isParallelAvailable(),
 		"parallel-mcp": allowedProviders.has("parallel-mcp") && isParallelMcpAvailable(),
-		tinyfish: allowedProviders.has("tinyfish") && isTinyFishAvailable(),
-		search1api: allowedProviders.has("search1api") && isSearch1APIAvailable(),
-		searchinfinity: allowedProviders.has("searchinfinity") && isSearchinfinityAvailable(),
-		querit: allowedProviders.has("querit") && isQueritAvailable(),
-		tavily: allowedProviders.has("tavily") && isTavilyAvailable(),
-		you: allowedProviders.has("you") && isYouAvailable(),
 		firecrawl: allowedProviders.has("firecrawl") && isFirecrawlAvailable(),
-		jina: allowedProviders.has("jina") && isJinaSearchAvailable(),
-		serpdive: allowedProviders.has("serpdive") && isSerpdiveAvailable(),
-		kagi: allowedProviders.has("kagi") && isKagiAvailable(),
-		bocha: allowedProviders.has("bocha") && isBochaAvailable(),
-		ollama: allowedProviders.has("ollama") && isOllamaAvailable(),
 		searxng: allowedProviders.has("searxng") && isSearXNGAvailable(),
 		duckduckgo: allowedProviders.has("duckduckgo") && isDuckDuckGoAvailable(),
-		perplexity: allowedProviders.has("perplexity") && isPerplexityAvailable(),
 		exa: allowedProviders.has("exa") && isExaAvailable(),
-		gemini: geminiApiAvail || !!geminiWebAvail,
+		gemini: geminiApiAvail,
 		kimi: allowedProviders.has("kimi") && await isKimiSearchAvailable(ctx),
 		anysearch: allowedProviders.has("anysearch") && isAnySearchAvailable(),
-		xcrawl: allowedProviders.has("xcrawl") && isXcrawlAvailable(),
 		xai: allowedProviders.has("xai") && await isXaiSearchAvailable(ctx),
-		mistral: allowedProviders.has("mistral") && isMistralAvailable(),
-		brightdata: allowedProviders.has("brightdata") && isBrightDataAvailable(),
-		serpbase: allowedProviders.has("serpbase") && isSerpBaseAvailable(),
-		serpapi: allowedProviders.has("serpapi") && isSerpApiAvailable(),
-		serper: allowedProviders.has("serper") && isSerperAvailable(),
-		serply: allowedProviders.has("serply") && isSerplyAvailable(),
 		baizhi: allowedProviders.has("baizhi") && isBaizhiAvailable(),
 		zai: allowedProviders.has("zai") && isZaiAvailable(),
-		valyu: allowedProviders.has("valyu") && isValyuAvailable(),
 	};
 	return {
 		all: ALL_SEARCH_PROVIDERS.some(provider => provider === "gemini" ? geminiApiAvail : providers[provider]),
@@ -516,13 +453,6 @@ async function getProviderAvailability(ctx: ExtensionContext): Promise<ProviderA
 	};
 }
 
-async function getOptionalGeminiWebAvailability() {
-	try {
-		return await isGeminiWebAvailable();
-	} catch {
-		return null;
-	}
-}
 
 function shouldPreferOpenAI(options: Pick<PendingCurate, "numResults" | "recencyFilter"> | undefined, preferOpenAICodexDefault: boolean): boolean {
 	if (options?.recencyFilter) return false;
@@ -561,7 +491,6 @@ function firstAvailableProvider(available: ProviderAvailability, preferOpenAI: b
 	if (preferOpenAI && available.openai) return "openai";
 	if (available.exa) return "exa";
 	for (const provider of ALL_SEARCH_PROVIDERS) {
-		if (provider === "ollama" && available.bocha) return "bocha";
 		if (available[provider]) return provider;
 	}
 	const allowed = getAllowedSearchProviders();
@@ -652,8 +581,7 @@ function stripThumbnails(results: ExtractedContent[]): ExtractedContent[] {
 	return results.map(({ thumbnail, frames, ...rest }) => rest);
 }
 
-function storeFetchResult(pi: { appendEntry(type: string, data: unknown): void }, responseId: string, data: StoredSearchData & { type: "fetch"; urls: ExtractedContent[] }, authProfile?: AuthFetchProfile): boolean {
-	if (authProfile?.cache === "off") return false;
+function storeFetchResult(pi: { appendEntry(type: string, data: unknown): void }, responseId: string, data: StoredSearchData & { type: "fetch"; urls: ExtractedContent[] }): boolean {
 	pi.appendEntry("web-search-results", storeFetchedContentResult(responseId, data));
 	return true;
 }
@@ -1080,10 +1008,6 @@ function handleSessionChange(ctx: ExtensionContext): void {
 export default function (pi: ExtensionAPI) {
 	const initConfig = loadConfigForExtensionInit();
 	const fetchModeConfig = resolveFetchModeConfig(initConfig);
-	const toolActivation = initConfig.toolActivation ?? "auto";
-	if (toolActivation !== "auto" && toolActivation !== "dynamic" && toolActivation !== "eager") {
-		throw new Error(`toolActivation in ${WEB_SEARCH_CONFIG_PATH} must be "auto", "dynamic", or "eager"`);
-	}
 	const allowedSearchProviders = initConfig.webSearch?.allowedProviders === undefined ? RESOLVED_SEARCH_PROVIDERS : getAllowedSearchProviders();
 	const allEligibleProviders = allowedSearchProviders.filter(provider => ALL_SEARCH_PROVIDERS.includes(provider));
 	const allExcludedProviders = allowedSearchProviders.filter(provider => !ALL_SEARCH_PROVIDERS.includes(provider));
@@ -1098,6 +1022,21 @@ export default function (pi: ExtensionAPI) {
 	const sourceCheckEnabled = isToolEnabled(initConfig, "sourceCheck");
 	const fetchContentEnabled = isToolEnabled(initConfig, "fetchContent");
 	const getSearchContentEnabled = isToolEnabled(initConfig, "getSearchContent");
+	const webToolNames = [
+		...(webSearchEnabled ? [toolNames.webSearch] : []),
+		...(sourceCheckEnabled ? [toolNames.sourceCheck] : []),
+		...(fetchContentEnabled ? [toolNames.fetchContent] : []),
+		...(getSearchContentEnabled ? [toolNames.getSearchContent] : []),
+	];
+	function handleWebSessionChange(ctx: ExtensionContext): void {
+		handleSessionChange(ctx);
+		// Older branches can restore a tool list that predates these tools.
+		// Keep configured web tools available without an activation step.
+		const activeTools = pi.getActiveTools();
+		if (webToolNames.some(name => !activeTools.includes(name))) {
+			pi.setActiveTools([...new Set([...activeTools, ...webToolNames])]);
+		}
+	}
 	// Names as registered this session, so fetch failure guidance never points
 	// at tools that are disabled or were renamed after init.
 	const registeredToolNames = {
@@ -1818,8 +1757,8 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("session_start", async (_event, ctx) => handleSessionChange(ctx));
-	pi.on("session_tree", async (_event, ctx) => handleSessionChange(ctx));
+	pi.on("session_start", (_event, ctx) => handleWebSessionChange(ctx));
+	pi.on("session_tree", (_event, ctx) => handleWebSessionChange(ctx));
 
 	pi.on("session_shutdown", () => {
 		sessionActive = false;
@@ -2567,9 +2506,6 @@ export default function (pi: ExtensionAPI) {
 			model: Type.Optional(Type.String({
 				description: "Gemini video model override; default from config or gemini-3.6-flash.",
 			})),
-			auth: Type.Optional(Type.Union([Type.String(), Type.Boolean()], {
-				description: "Opt into an authFetch profile for local browser-cookie fetching. Use a profile name, or true only when exactly one profile exists.",
-			})),
 			proxy: Type.Optional(Type.String({
 				description: "HTTP(S)/SOCKS proxy; localhost/NO_PROXY bypass it. Empty string forces direct access.",
 			})),
@@ -2602,18 +2538,6 @@ export default function (pi: ExtensionAPI) {
 				if (mode === "answer" && options.model) {
 					return { content: [{ type: "text", text: "Error: use answerModel, not model, with mode answer." }], details: { error: "model is incompatible with mode answer" } };
 				}
-				if (mode === "answer" && options.auth !== undefined) {
-					return { content: [{ type: "text", text: "Error: auth cannot be combined with mode answer." }], details: { error: "auth cannot be combined with mode answer" } };
-				}
-				let authFetchProfile: AuthFetchProfile | undefined;
-				if (options.auth !== undefined) {
-					try {
-						authFetchProfile = resolveAuthFetchProfile(options.auth);
-					} catch (err) {
-						const error = err instanceof Error ? err.message : String(err);
-						return { content: [{ type: "text", text: `Error: ${error}` }], details: { error } };
-					}
-				}
 				if (urlList.length === 0) {
 					return {
 						content: [{ type: "text", text: "Error: No URL provided." }],
@@ -2626,11 +2550,10 @@ export default function (pi: ExtensionAPI) {
 					details: { phase: "fetch", progress: 0 },
 				});
 
-				const { answerModel: _answerModel, auth: _auth, ...extractionOptions } = { ...options, mode };
+				const { answerModel: _answerModel, ...extractionOptions } = { ...options, mode };
 				const { prompt: _prompt, ...answerExtractionOptions } = extractionOptions;
 				const fetchOptions = {
 					...(mode === "answer" ? answerExtractionOptions : extractionOptions),
-					...(authFetchProfile ? { authFetchProfile } : {}),
 				};
 				const fetchResults = await fetchAllContent(urlList, signal, withRegisteredFetchOptions(fetchOptions, registeredToolNames, options.proxy));
 				const presentedResults = mode === "answer"
@@ -2662,7 +2585,7 @@ export default function (pi: ExtensionAPI) {
 					timestamp: Date.now(),
 					urls: stripThumbnails(fetchResults),
 				} satisfies StoredSearchData & { type: "fetch"; urls: ExtractedContent[] };
-				const storedContent = storeFetchResult(pi, responseId, data, authFetchProfile);
+				const storedContent = storeFetchResult(pi, responseId, data);
 
 				if (urlList.length === 1) {
 					const result = presentedResults[0];
@@ -2738,7 +2661,7 @@ export default function (pi: ExtensionAPI) {
 					? getSearchContentEnabled
 						? `\n---\nUse ${toolNames.getSearchContent}({ responseId: "${responseId}", urlIndex: 0 }) to retrieve bounded content slices.`
 						: "\n---\nContent retrieval is not registered."
-					: "\n---\nAuthenticated fetch cache is off; repeat the fetch to read content.";
+					: "\n---\nContent cache is unavailable; repeat the fetch to read content.";
 
 				return {
 					content: [{ type: "text", text: output }],
@@ -2755,7 +2678,7 @@ export default function (pi: ExtensionAPI) {
 				return new Text(theme.fg("toolTitle", theme.bold("fetch ")) + theme.fg("error", "(invalid parameters)"), 0, 0);
 			}
 			const { urlList, options } = normalized;
-			const { prompt, timestamp, frames, model, mode, answerModel, auth } = options;
+			const { prompt, timestamp, frames, model, mode, answerModel } = options;
 			if (urlList.length === 0) {
 				return new Text(theme.fg("toolTitle", theme.bold("fetch ")) + theme.fg("error", "(no URL)"), 0, 0);
 			}
@@ -2790,9 +2713,7 @@ export default function (pi: ExtensionAPI) {
 			if (answerModel) {
 				lines.push(theme.fg("dim", "  answer model: ") + theme.fg("warning", answerModel));
 			}
-			if (auth !== undefined) {
-				lines.push(theme.fg("dim", "  auth: ") + theme.fg("warning", auth === true ? "true" : auth));
-			}
+
 			return new Text(lines.join("\n"), 0, 0);
 		},
 
@@ -3264,13 +3185,6 @@ export default function (pi: ExtensionAPI) {
 	});
 	}
 
-	if (toolActivation !== "eager") registerWebToolActivation(pi, [
-		...(webSearchEnabled ? [{ name: toolNames.webSearch, capability: "search" as const }] : []),
-		...(sourceCheckEnabled ? [{ name: toolNames.sourceCheck, capability: "source-check" as const }] : []),
-		...(fetchContentEnabled ? [{ name: toolNames.fetchContent, capability: "fetch" as const }] : []),
-		...(getSearchContentEnabled ? [{ name: toolNames.getSearchContent, capability: "stored-content" as const }] : []),
-	], toolActivation);
-
 	if (isCommandEnabled(initConfig, "websearch")) pi.registerCommand("websearch", {
 		description: "Open web search curator",
 		handler: async (args, ctx) => {
@@ -3576,53 +3490,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	if (isCommandEnabled(initConfig, "google-account")) pi.registerCommand("google-account", {
-		description: "Show the active Google account for Gemini Web",
-		handler: async () => {
-			if (!isBrowserCookieAccessAllowed()) {
-				pi.sendMessage({
-					customType: "google-account",
-					content: [{ type: "text", text: `Gemini Web browser cookie access is disabled. Set allowBrowserCookies: true in ${WEB_SEARCH_CONFIG_PATH} to enable it.` }],
-					display: true,
-					details: { available: false, cookieAccessAllowed: false },
-				}, { triggerTurn: true, deliverAs: "followUp" });
-				return;
-			}
-
-			const cookies = await isGeminiWebAvailable();
-			if (!cookies) {
-				const diagnostic = getGeminiWebAvailabilityDiagnostic();
-				const diagnosticDetails = getGeminiWebAvailabilityDiagnosticDetails();
-				const attempted = formatCookieAttempts(diagnosticDetails?.attempts ?? []);
-				const text = diagnostic
-					? `Gemini Web is unavailable: ${diagnostic}${attempted ? ` Attempted browser profiles: ${attempted}.` : ""}`
-					: "Gemini Web is unavailable. Sign into gemini.google.com in a supported Chromium-based browser.";
-				pi.sendMessage({
-					customType: "google-account",
-					content: [{ type: "text", text }],
-					display: true,
-					details: { available: false, cookieAccessAllowed: true, diagnostic, cookieDiagnostic: diagnosticDetails },
-				}, { triggerTurn: true, deliverAs: "followUp" });
-				return;
-			}
-
-			const email = await getActiveGoogleEmail(cookies);
-			const text = email
-				? `Active Google account: ${email}`
-				: "Gemini Web is available, but the active Google account could not be determined.";
-
-			pi.sendMessage({
-				customType: "google-account",
-				content: [{ type: "text", text }],
-				display: true,
-				details: { available: true, email: email ?? null },
-			}, { triggerTurn: true, deliverAs: "followUp" });
-		},
-	});
-
-	function formatCookieAttempts(attempts: { browser: string; profile: string; status: string }[]): string {
-		return attempts.map(({ browser, profile, status }) => `${browser}/${profile} (${status})`).join(", ");
-	}
 
 	if (isCommandEnabled(initConfig, "search")) pi.registerCommand("search", {
 		description: "Browse stored web search results",

@@ -1,10 +1,10 @@
 {
   "name": "@narumitw/pi-goal",
-  "version": "0.54.8",
-  "description": "Pi extension for autonomous single-objective /goal completion.",
+  "version": "0.54.8-local.1",
+  "description": "Local Pi Goal extension with model-neutral unused sessions.",
   "type": "module",
   "license": "MIT",
-  "private": false,
+  "private": true,
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -14,14 +14,15 @@
   ],
   "files": [
     "src",
-    "dist",
+    "index.ts",
+    "LOCAL.md",
     "docs",
     "README.md",
     "LICENSE"
   ],
   "pi": {
     "extensions": [
-      "./dist/index.ts"
+      "./index.ts"
     ]
   },
   "scripts": {

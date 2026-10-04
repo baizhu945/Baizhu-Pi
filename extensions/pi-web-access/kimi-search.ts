@@ -3,7 +3,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { activityMonitor } from "./activity.ts";
 import { normalizeDomain } from "./domain-filter-normalization.ts";
 import { redactCredential } from "./credential-source.ts";
-import type { SearchOptions, SearchResponse, SearchResult } from "./perplexity.ts";
+import type { SearchOptions, SearchResponse, SearchResult } from "./search-types.ts";
 import { formatSearchResultsAsAnswer } from "./search-answer-formatting.ts";
 import { normalizeSearchResultCount } from "./search-result-count-normalization.ts";
 

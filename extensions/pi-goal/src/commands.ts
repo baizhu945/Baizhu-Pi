@@ -71,8 +71,7 @@ export class GoalCommandController {
       }
     }
 
-    // Tool registration keeps the Goal schema stable. A missing tool means another
-    // policy or allowlist intentionally removed it, so activation must not widen it.
+    // Register Goal tools on explicit activation, respecting Pi's tool selection.
     if (isRequestCurrent && !isRequestCurrent()) return;
     const retainedOwner = this.runtime.ownsWorkflow(existingGoal);
     if (!this.runtime.acquireWorkflow(ctx.sessionManager)) return this.reportWorkflowBusy(ctx);
