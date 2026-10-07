@@ -49,10 +49,72 @@ test("RPC mode cannot open unsupported custom TUI or alter the loadout", async (
     f.ctx.ui.custom = async () => { customCalls++; return undefined; };
     await f.commands.get("unipi:model").handler("", f.ctx);
     await f.commands.get("unipi:fusion-preset").handler("", f.ctx);
+    await f.commands.get("unipi:sidekick").handler("", f.ctx);
     assert.equal(customCalls, 0);
     assert.deepEqual(f.changedModels, []);
     assert.deepEqual(f.pi.getActiveTools(), ["read", "bash", "edit", "write"]);
   } finally { f.close(); }
+});
+
+test("the sidekick entrance stays neutral when Fusion is disabled and does not spawn on viewing", async () => {
+  const f = await fixture();
+  let component: any;
+  let inspected: SidekickRuntime | undefined;
+  const original = SidekickRuntime.prototype.currentMessage;
+  SidekickRuntime.prototype.currentMessage = function () { inspected = this; return undefined; };
+  try {
+    let customCalls = 0;
+    const pickerCustom = f.ctx.ui.custom;
+    f.ctx.ui.custom = async () => { customCalls++; };
+    await f.commands.get("unipi:sidekick").handler("", f.ctx);
+    assert.equal(customCalls, 0);
+    assert.deepEqual(f.pi.getActiveTools(), ["read", "bash", "edit", "write"]);
+    f.ctx.ui.custom = pickerCustom;
+    await f.select(pair);
+    f.ctx.ui.custom = (factory: any) => new Promise(resolve => {
+      component = factory({ terminal: { rows: 40 }, requestRender() {} }, { fg: (_c: string, text: string) => text, bold: (text: string) => text }, undefined, resolve);
+    });
+    const opened = f.commands.get("unipi:sidekick").handler("", f.ctx);
+    assert.match(component.render(100).join("\n"), /live conversation/);
+    assert.equal(inspected?.isAlive(), false);
+    assert.equal(inspected?.latest(), undefined);
+    component.handleInput("\x1b");
+    await opened;
+    assert.equal(inspected?.isAlive(), false);
+  } finally { SidekickRuntime.prototype.currentMessage = original; f.close(); }
+});
+
+test("human sidekick messages share completion delivery; switching sessions closes and invalidates the inspector", async () => {
+  const f = await fixture();
+  const sent: any[] = [];
+  f.pi.sendMessage = (message: any, options: any) => sent.push({ message, options });
+  const original = SidekickRuntime.prototype.handoff;
+  let calls = 0;
+  SidekickRuntime.prototype.handoff = function (message: string) {
+    calls++;
+    assert.equal(message, "human direction");
+    const report: any = { id: "human-handoff", status: "completed", text: "verified", events: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, toolCalls: 0, durationMs: 1 };
+    this.reports.set(report.id, report);
+    return { id: report.id, done: Promise.resolve(report) };
+  };
+  let component: any;
+  try {
+    await f.select(pair);
+    f.ctx.ui.custom = (factory: any) => new Promise(resolve => {
+      component = factory({ terminal: { rows: 40 }, requestRender() {} }, { fg: (_c: string, text: string) => text, bold: (text: string) => text }, undefined, resolve);
+    });
+    const opened = f.commands.get("unipi:sidekick").handler("", f.ctx);
+    for (const input of ["\r", "human direction", "\r"]) component.handleInput(input);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls, 1);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].message.customType, "sidekick-completion");
+    assert.deepEqual(sent[0].options, { deliverAs: "followUp", triggerTurn: true });
+    await f.switchSession();
+    await opened;
+    for (const input of ["\r", "human direction", "\r"]) component.handleInput(input);
+    assert.equal(calls, 1);
+  } finally { SidekickRuntime.prototype.handoff = original; f.close(); }
 });
 
 test("a registry model added after the first picker is immediately selectable", async () => {
@@ -124,4 +186,26 @@ test("session identifiers never escape the sidekick storage directory", () => {
   const traversal = sidekickSessionPath("../../../../escape");
   assert.equal(traversal.includes("/../"), false);
   assert.match(traversal, /\/fusion\/sidekick\/[^/]+\.jsonl$/);
+});
+
+test("token bursts coalesce status work and session replacement cancels pending refreshes", async () => {
+  const f = await fixture();
+  let captured: any;
+  const original = SidekickRuntime.prototype.latest;
+  SidekickRuntime.prototype.latest = function () { captured = this; return undefined; };
+  try {
+    await f.select(pair);
+    await assert.rejects(f.tools.get("read_subagent").execute("capture", {}, undefined, undefined, f.ctx), /No sidekick handoff/);
+    let branchReads = 0;
+    f.ctx.sessionManager.getBranch = () => { branchReads++; return f.branch; };
+    for (let i = 0; i < 1000; i++) captured.cfg.onProgress();
+    assert.equal(branchReads, 0, "token parsing never synchronously walks the lead branch");
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.ok(branchReads > 0 && branchReads <= 8, `${branchReads} branch reads for one coalesced refresh`);
+    for (let i = 0; i < 1000; i++) captured.cfg.onProgress();
+    await f.switchSession();
+    const afterSwitch = branchReads;
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(branchReads, afterSwitch, "old pending display work cannot leak into another session");
+  } finally { SidekickRuntime.prototype.latest = original; f.close(); }
 });

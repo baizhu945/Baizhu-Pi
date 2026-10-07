@@ -166,7 +166,7 @@ let
 
   piWebAccessLocal = pkgs.stdenvNoCC.mkDerivation {
     pname = "pi-web-access-local";
-    version = "0.35.0-local.3";
+    version = "0.35.0-local.4";
     src = ./pi-web-access;
     nativeBuildInputs = [ pkgs.gnutar pkgs.nodejs pkgs.esbuild ];
     dontConfigure = true;

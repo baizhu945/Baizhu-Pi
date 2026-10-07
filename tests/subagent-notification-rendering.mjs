@@ -11,7 +11,7 @@ const [packageDir, entryPath, sessionPath, sessionEntryId] = process.argv.slice(
 assert(packageDir, 'Expected Pi package directory');
 const entry = entryPath ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../extensions/subagents/index.ts');
 const require = createRequire(path.join(packageDir, 'package.json'));
-const dependencies = createRequire(path.join(process.env.HOME, '.pi/agent/extensions/pi-subagents/index.ts'));
+const dependencies = createRequire(path.join(process.env.PI_SUBAGENTS_TEST_DEPS ?? path.join(process.env.HOME, '.pi/agent/extensions/pi-subagents'), 'index.ts'));
 const { createJiti } = await import(pathToFileURL(require.resolve('jiti')));
 const jiti = createJiti(import.meta.url, { moduleCache: false, alias: {
   '@earendil-works/pi-coding-agent': path.join(packageDir, 'dist/index.js'),
@@ -94,6 +94,14 @@ test('escaped task-like result text cannot split or replace another agent result
 test('expanded legacy messages keep the complete original payload', () => {
   const legacy = message('LEGACY_FIRST\n' + 'complete legacy line\n'.repeat(60) + 'LEGACY_LAST', second);
   assert.match(render(legacy).join('\n'), /LEGACY_FIRST[\s\S]*LEGACY_LAST/);
+});
+
+test('collapsed failure shows the actual error instead of progress text', () => {
+  const failed = { ...details('failed', 'Failed report', 'Preparing report.', 'error'), error: 'Upstream idle timeout exceeded' };
+  const notification = message(envelope('failed', 'Preparing report.', 'task_error'), failed);
+  const rows = render(notification, false).join('\n');
+  assert.match(rows, /Upstream idle timeout exceeded/);
+  assert.doesNotMatch(rows, /Preparing report\./);
 });
 
 if (sessionPath) test('saved batch renders every complete task under its matching agent', () => {

@@ -44,8 +44,8 @@ const MAX_PREVIEW_CHARS = 600;
  * gate that makes the shape trustworthy.
  */
 export type DialogUI = {
-	select: (title: string, options: string[]) => Promise<string | undefined>;
-	input: (title: string, placeholder?: string) => Promise<string | undefined>;
+	select: (title: string, options: string[], opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
+	input: (title: string, placeholder?: string, opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
 };
 
 /** True when the host implements the select/input dialog primitives. */
@@ -87,12 +87,14 @@ function buildPreviewBlock(question: QuestionData): string {
  * `QuestionAnswer` is produced per question otherwise, so the envelope is
  * identical to the TUI path's.
  */
-export async function runRpcQuestionnaire(ui: DialogUI, params: QuestionParams): Promise<QuestionnaireResult> {
+export async function runRpcQuestionnaire(ui: DialogUI, params: QuestionParams, signal?: AbortSignal): Promise<QuestionnaireResult> {
 	const answers: QuestionAnswer[] = [];
 	for (let qi = 0; qi < params.questions.length; qi++) {
+		signal?.throwIfAborted();
 		const q = params.questions[qi];
 		const header = q.header ? `[${q.header}] ` : "";
-		const answer = q.multiSelect ? await askMultiSelect(ui, q, qi, header) : await askSingleSelect(ui, q, qi, header);
+		const answer = q.multiSelect ? await askMultiSelect(ui, q, qi, header, signal) : await askSingleSelect(ui, q, qi, header, signal);
+		signal?.throwIfAborted();
 		if (answer === undefined) return { answers, cancelled: true };
 		answers.push(answer);
 	}
@@ -105,15 +107,17 @@ async function askSingleSelect(
 	q: QuestionData,
 	questionIndex: number,
 	header: string,
+	signal?: AbortSignal,
 ): Promise<QuestionAnswer | undefined> {
 	const options = q.options.map(formatOptionLine);
 	options.push(`${q.options.length + 1}. ${displayLabel("other")}`);
-	const chosen = await ui.select(`${header}${q.question}${buildPreviewBlock(q)}`, options);
+	const chosen = await ui.select(`${header}${q.question}${buildPreviewBlock(q)}`, options, { signal });
+	signal?.throwIfAborted();
 	if (chosen == null) return undefined;
-	const idx = parseIndex(chosen, options.length);
+	const idx = options.indexOf(chosen);
 	// A host returning something outside the offered list is indistinguishable
 	// from a dismissal — treat it as one rather than fabricate an answer.
-	if (idx == null) return undefined;
+	if (idx < 0) return undefined;
 	if (idx < q.options.length) {
 		const o = q.options[idx];
 		return {
@@ -125,7 +129,8 @@ async function askSingleSelect(
 		};
 	}
 	// "Type something." sentinel → free-text follow-up.
-	const typed = await ui.input(`${header}${q.question}\n\n${t("rpc.custom_answer_title", CUSTOM_ANSWER_TITLE)}`, "");
+	const typed = await ui.input(`${header}${q.question}\n\n${t("rpc.custom_answer_title", CUSTOM_ANSWER_TITLE)}`, "", { signal });
+	signal?.throwIfAborted();
 	if (typed == null) return undefined;
 	return { questionIndex, question: q.question, kind: "custom", answer: typed };
 }
@@ -136,12 +141,15 @@ async function askMultiSelect(
 	q: QuestionData,
 	questionIndex: number,
 	header: string,
+	signal?: AbortSignal,
 ): Promise<QuestionAnswer | undefined> {
 	const list = q.options.map(formatOptionLine).join("\n");
 	const value = await ui.input(
 		`${header}${q.question}\n\n${list}\n\n${t("rpc.multi_instructions", MULTI_SELECT_INSTRUCTIONS)}`,
 		MULTI_SELECT_PLACEHOLDER,
+		{ signal },
 	);
+	signal?.throwIfAborted();
 	if (value == null) return undefined;
 	const trimmed = value.trim();
 	if (trimmed.length === 0) {

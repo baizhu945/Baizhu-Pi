@@ -9,7 +9,7 @@ let
 
   rpivAskUserQuestionLocal = pkgs.stdenvNoCC.mkDerivation {
     pname = "rpiv-ask-user-question-local";
-    version = "2.12.0";
+    version = "2.12.0-local.1";
     src = ./rpiv-ask-user-question;
     nativeBuildInputs = [ pkgs.gnutar ];
     dontConfigure = true;

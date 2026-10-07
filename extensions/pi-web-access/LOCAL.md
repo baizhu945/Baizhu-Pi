@@ -43,3 +43,5 @@ Home Manager builds `dist` from the current local TypeScript using
 directly in `../pi-web-access.nix`; no separate dependency manifest or npm
 installation is used. The original README below describes the upstream package;
 its instructions for the removed services do not apply to this local build.
+
+Local revision 0.35.0-local.4 isolates foreground and stored results across session/branch changes, avoids permanent RAM copies of disk-backed pages, bounds fuzzy edit-distance work, identifies stored results by complete IDs, and fixes curator UTF-8/POST/disconnect handling. Proxy fetch supports Request objects and HEAD, survives reload, honors NO_PROXY ports and all loopbacks, stores credentials in private curl config files, bounds proxy responses to 32 MiB, rejects partial curl failures, and cleans temporary files on errors. Redirects release bodies and strip credentials/body headers as appropriate; policy reads fail closed and detect atomic replacements.

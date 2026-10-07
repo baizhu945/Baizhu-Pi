@@ -20,23 +20,27 @@ function normalize(value: string): string {
 
 function editDistanceWithin(left: string, right: string, maximum: number): boolean {
 	if (Math.abs(left.length - right.length) > maximum) return false;
-	let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+	if (left === right) return true;
+	const outside = maximum + 1;
+	let previous = new Map<number, number>();
+	for (let j = 0; j <= Math.min(right.length, maximum); j++) previous.set(j, j);
 	for (let i = 1; i <= left.length; i++) {
-		const current = [i];
-		let rowMinimum = i;
-		for (let j = 1; j <= right.length; j++) {
+		const current = new Map<number, number>();
+		if (i <= maximum) current.set(0, i);
+		let rowMinimum = current.get(0) ?? outside;
+		for (let j = Math.max(1, i - maximum); j <= Math.min(right.length, i + maximum); j++) {
 			const value = Math.min(
-				previous[j] + 1,
-				current[j - 1] + 1,
-				previous[j - 1] + (left[i - 1] === right[j - 1] ? 0 : 1),
+				(previous.get(j) ?? outside) + 1,
+				(current.get(j - 1) ?? outside) + 1,
+				(previous.get(j - 1) ?? outside) + (left[i - 1] === right[j - 1] ? 0 : 1),
 			);
-			current[j] = value;
+			current.set(j, value);
 			rowMinimum = Math.min(rowMinimum, value);
 		}
 		if (rowMinimum > maximum) return false;
 		previous = current;
 	}
-	return previous[right.length] <= maximum;
+	return (previous.get(right.length) ?? outside) <= maximum;
 }
 
 function literalMatches(text: string, query: string, caseInsensitive: boolean): Match[] {

@@ -1,7 +1,8 @@
 import { lookup as dnsLookup } from "node:dns/promises";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import net from "node:net";
 import { getActiveProxy, getWebSearchConfigPath, hasScopedProxyDecision, isProxyBypassedUrl, loadConfiguredProxy, normalizeProxyUrl } from "./utils.ts";
+import { awaitWithAbort } from "./abortable.ts";
 
 const DEFAULT_MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -18,14 +19,13 @@ const WEB_SEARCH_CONFIG_PATH = getWebSearchConfigPath();
 let cachedConfigRoot: { signature: string; value: Record<string, unknown> | null } | null = null;
 
 function loadConfigRoot(): Record<string, unknown> | null {
-	if (!existsSync(WEB_SEARCH_CONFIG_PATH)) return null;
-
 	let signature: string;
 	try {
 		const stat = statSync(WEB_SEARCH_CONFIG_PATH);
-		signature = `${stat.mtimeMs}:${stat.size}`;
-	} catch {
-		return null;
+		signature = `${stat.dev}:${stat.ino}:${stat.ctimeMs}:${stat.mtimeMs}:${stat.size}`;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw new Error(`Cannot read web access policy configuration: ${WEB_SEARCH_CONFIG_PATH}`);
 	}
 
 	if (cachedConfigRoot?.signature === signature) return cachedConfigRoot.value;
@@ -34,22 +34,18 @@ function loadConfigRoot(): Record<string, unknown> | null {
 	try {
 		raw = readFileSync(WEB_SEARCH_CONFIG_PATH, "utf-8");
 	} catch {
-		// Do not memoize read failures: a chmod fix changes neither mtime nor size,
-		// so a cached failure would permanently fail-open the domain policy.
-		return null;
+		throw new Error(`Cannot read web access policy configuration: ${WEB_SEARCH_CONFIG_PATH}`);
 	}
 
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${WEB_SEARCH_CONFIG_PATH}: ${message}`);
+	} catch {
+		throw new Error(`Failed to parse ${WEB_SEARCH_CONFIG_PATH}: invalid JSON`);
 	}
 
-	const value = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-		? parsed as Record<string, unknown>
-		: null;
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`Invalid policy configuration: ${WEB_SEARCH_CONFIG_PATH}`);
+	const value = parsed as Record<string, unknown>;
 	cachedConfigRoot = { signature, value };
 	return value;
 }
@@ -190,6 +186,7 @@ export async function validateRemoteUrl(rawUrl: string | URL, options: Validatio
 	if (url.protocol !== "http:" && url.protocol !== "https:") {
 		throw new Error("Only HTTP and HTTPS URLs can be fetched remotely");
 	}
+	if (url.username || url.password) throw new Error("Remote URLs must not include credentials");
 
 	const hostname = normalizeHostname(url.hostname);
 	if (!hostname) throw new Error("URL must include a hostname");
@@ -243,26 +240,39 @@ export async function fetchRemoteUrl(
 ): Promise<Response> {
 	const fetchImpl = options.fetch ?? fetch;
 	const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
-	let current = await validateRemoteUrl(url, options);
+	if (!Number.isSafeInteger(maxRedirects) || maxRedirects < 0 || maxRedirects > 20) throw new Error("maxRedirects must be an integer from 0 to 20");
+	const signal = init.signal ?? undefined;
+	signal?.throwIfAborted();
+	let current = await awaitWithAbort(validateRemoteUrl(url, options), signal);
 	const configuredOrigin = current.origin;
 	let requestInit = init;
 
 	for (let redirects = 0; redirects <= maxRedirects; redirects++) {
+		signal?.throwIfAborted();
 		const response = await fetchImpl(current, { ...requestInit, redirect: "manual" });
 		if (!REDIRECT_STATUSES.has(response.status)) return response;
 
 		const location = response.headers.get("location");
 		if (!location) return response;
+		await response.body?.cancel().catch(() => {});
 		if (redirects === maxRedirects) throw new Error(`Too many redirects fetching ${current.toString()}`);
 
 		const from = current;
 		const next = new URL(location, current);
 		// allowLoopback exempts an explicitly configured endpoint, never a redirect target: a loopback
 		// base must not be able to pivot the request onto a different loopback origin.
-		current = await validateRemoteUrl(next, next.origin === configuredOrigin ? options : { ...options, allowLoopback: false });
-		if (response.status === 303 || ((response.status === 301 || response.status === 302) && requestInit.method?.toUpperCase() === "POST")) {
+		current = await awaitWithAbort(validateRemoteUrl(next, next.origin === configuredOrigin ? options : { ...options, allowLoopback: false }), signal);
+		const method = requestInit.method?.toUpperCase() ?? "GET";
+		if ((response.status === 303 && method !== "GET" && method !== "HEAD") || ((response.status === 301 || response.status === 302) && method === "POST")) {
 			const { body: _body, ...nextInit } = requestInit;
-			requestInit = { ...nextInit, method: "GET" };
+			const headers = new Headers(nextInit.headers);
+			for (const name of ["content-type", "content-length", "content-encoding", "content-language", "content-location"]) headers.delete(name);
+			requestInit = { ...nextInit, method: "GET", headers };
+		}
+		if (from.origin !== current.origin) {
+			const headers = new Headers(requestInit.headers);
+			for (const name of ["authorization", "cookie", "proxy-authorization"]) headers.delete(name);
+			requestInit = { ...requestInit, headers };
 		}
 		if (options.onRedirect) requestInit = options.onRedirect({ from, to: current, init: requestInit, response });
 	}
@@ -320,7 +330,7 @@ function hostnameMatchesNoProxy(hostname: string, port: string, entry: string): 
 		const closingBracket = hostEntry.indexOf("]");
 		if (closingBracket >= 0) {
 			const suffix = hostEntry.slice(closingBracket + 1);
-			if (/^:\\d+$/.test(suffix)) entryPort = suffix.slice(1);
+			if (/^:\d+$/.test(suffix)) entryPort = suffix.slice(1);
 			hostEntry = hostEntry.slice(0, closingBracket + 1);
 		}
 	} else {

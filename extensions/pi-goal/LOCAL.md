@@ -20,3 +20,5 @@ provider stream. It compares the full request context for absent and loaded-but-
 unused extensions, exercises mode transitions and checks tool collisions and
 denylist behavior. It makes no model or network calls and runs during the Nix
 installation check.
+
+Local revision 0.54.8-local.2 adds locked/private atomic settings and legacy cleanup, preserves malformed state, releases workflow listeners on unbind, re-arms long wait deadlines and preserves apostrophes in natural objectives.

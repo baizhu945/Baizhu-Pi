@@ -19,7 +19,7 @@ for (const file of files) {
   if (outcome.status !== 0) failed = true;
 }
 if (!selected.length) {
-  for (const script of ['runtime-sdk.mjs', 'background-integration.mjs', 'neutrality.test.mjs']) {
+  for (const script of ['render-performance.mjs', 'runtime-sdk.mjs', 'sidekick-process.mjs', 'background-integration.mjs', 'neutrality.test.mjs']) {
     const outcome = spawnSync(process.execPath, [path.join(directory, script), packageDir], {
       stdio: 'inherit',
       env: { ...process.env, PI_OFFLINE: '1', UNIPI_FUSION_CHILD: '', UNIPI_SUBAGENT_CHILD: '' },

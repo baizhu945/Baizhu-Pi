@@ -22,6 +22,7 @@ import {
 	restoreFromSession,
 	storeFetchedContentResult,
 	storeResult,
+	withResultSession,
 	type QueryResultData,
 	type StoredSearchData,
 } from "./storage.ts";
@@ -529,6 +530,12 @@ function resolveProvider(
 
 const pendingFetches = new Map<string, AbortController>();
 let sessionActive = false;
+const foregroundOperations = new Set<AbortController>();
+
+function abortForegroundOperations(): void {
+	for (const controller of foregroundOperations) controller.abort(new Error("Web operation cancelled after session or branch change"));
+	foregroundOperations.clear();
+}
 let widgetVisible = false;
 let widgetUnsubscribe: (() => void) | null = null;
 const pendingCurates = new Map<string, PendingCurate>();
@@ -989,6 +996,7 @@ function formatEntryLine(
 }
 
 function handleSessionChange(ctx: ExtensionContext): void {
+	abortForegroundOperations();
 	abortPendingFetches();
 	closeCurator();
 	clearCloneCache();
@@ -1006,6 +1014,21 @@ function handleSessionChange(ctx: ExtensionContext): void {
 }
 
 export default function (pi: ExtensionAPI) {
+	const registerSessionTool: ExtensionAPI["registerTool"] = tool => {
+		pi.registerTool({ ...tool, async execute(callId, params, signal, onUpdate, ctx) {
+			const controller = new AbortController();
+			foregroundOperations.add(controller);
+			const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+			try {
+				return await withResultSession(async () => {
+					combined.throwIfAborted();
+					const result = await tool.execute(callId, params, combined, onUpdate, ctx);
+					combined.throwIfAborted();
+					return result;
+				});
+			} finally { foregroundOperations.delete(controller); }
+		} });
+	};
 	const initConfig = loadConfigForExtensionInit();
 	const fetchModeConfig = resolveFetchModeConfig(initConfig);
 	const allowedSearchProviders = initConfig.webSearch?.allowedProviders === undefined ? RESOLVED_SEARCH_PROVIDERS : getAllowedSearchProviders();
@@ -1761,6 +1784,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_tree", (_event, ctx) => handleWebSessionChange(ctx));
 
 	pi.on("session_shutdown", () => {
+		abortForegroundOperations();
 		sessionActive = false;
 		abortPendingFetches();
 		closeCurator();
@@ -1773,7 +1797,7 @@ export default function (pi: ExtensionAPI) {
 		widgetVisible = false;
 	});
 
-	if (webSearchEnabled) pi.registerTool({
+	if (webSearchEnabled) registerSessionTool({
 		name: toolNames.webSearch,
 		label: "Web Search",
 		description:
@@ -2371,7 +2395,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	if (sourceCheckEnabled) pi.registerTool({
+	if (sourceCheckEnabled) registerSessionTool({
 		name: toolNames.sourceCheck,
 		label: "Source Check",
 		description: "Gather web sources for a claim and return a bounded machine-readable research artifact with exact passage citations for manual review.",
@@ -2470,7 +2494,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	if (fetchContentEnabled) pi.registerTool({
+	if (fetchContentEnabled) registerSessionTool({
 		name: toolNames.fetchContent,
 		label: "Fetch Content",
 		description: `Fetch URLs, images, GitHub repos, PDFs, or videos where supported. Modes: ${fetchModeDescription}. ${fetchContentStorageNote}`,
@@ -2807,7 +2831,7 @@ export default function (pi: ExtensionAPI) {
 
 	if (getSearchContentEnabled) {
 		const maxInlineContentChars = getMaxInlineContentChars(initConfig);
-		pi.registerTool({
+		registerSessionTool({
 		name: toolNames.getSearchContent,
 		label: "Get Search Content",
 		description: `Retrieve bounded pages of full stored search results or fetched content, or find matching passages, from a previous ${storedContentSources} call.`,
@@ -3506,21 +3530,18 @@ export default function (pi: ExtensionAPI) {
 				const ageStr = age < 60 ? `${age}m ago` : `${Math.floor(age / 60)}h ago`;
 				if (r.type === "search" && r.queries) {
 					const query = r.queries[0]?.query || "unknown";
-					return `[${r.id.slice(0, 6)}] "${query}" (${r.queries.length} queries) - ${ageStr}`;
+					return `[${r.id}] "${query}" (${r.queries.length} queries) - ${ageStr}`;
 				}
 				if (r.type === "fetch" && (r.urls || r.urlMetadata)) {
-					return `[${r.id.slice(0, 6)}] ${(r.urls ?? r.urlMetadata ?? []).length} URLs fetched - ${ageStr}`;
+					return `[${r.id}] ${(r.urls ?? r.urlMetadata ?? []).length} URLs fetched - ${ageStr}`;
 				}
-				return `[${r.id.slice(0, 6)}] ${r.type} - ${ageStr}`;
+				return `[${r.id}] ${r.type} - ${ageStr}`;
 			});
 
 			const choice = await ctx.ui.select("Stored Search Results", options);
 			if (!choice) return;
 
-			const match = choice.match(/^\[([a-z0-9]+)\]/);
-			if (!match) return;
-
-			const selected = results.find((r) => r.id.startsWith(match[1]));
+			const selected = results[options.indexOf(choice)];
 			if (!selected) return;
 
 			const actions = ["View details", "Delete"];

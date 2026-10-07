@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -181,5 +181,19 @@ describe("tasks config", () => {
 
     expect(JSON.parse(readFileSync(projectConfigPath, "utf-8"))).toEqual({ glyphs: { completed: "[x]" } });
     expect(loadTasksConfig(cwd, agentDir)).toEqual({ glyphs: { pending: "[ ]", completed: "[x]" } });
+  });
+
+  it("preserves a malformed existing file when saving and leaves no temporary files", () => {
+    mkdirSync(dirname(projectConfigPath), { recursive: true });
+    writeFileSync(projectConfigPath, "{broken");
+    expect(() => saveTasksConfig({ maxVisible: 15 }, cwd, agentDir)).toThrow("Refusing to overwrite");
+    expect(readFileSync(projectConfigPath, "utf8")).toBe("{broken");
+    expect(readdirSync(dirname(projectConfigPath))).toEqual(["tasks-config.json"]);
+  });
+
+  it("atomically saves private project configuration", () => {
+    saveTasksConfig({ maxVisible: 15 }, cwd, agentDir);
+    expect(statSync(projectConfigPath).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dirname(projectConfigPath))).toEqual(["tasks-config.json"]);
   });
 });

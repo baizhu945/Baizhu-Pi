@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { Script } from "node:vm";
 import type { SessionInfo } from "@earendil-works/pi-coding-agent";
 import { fuzzyFilter } from "@earendil-works/pi-tui";
 
@@ -16,61 +17,88 @@ export interface Row {
   prefix: string;
 }
 
+// A user-entered regex can catastrophically backtrack over saved transcripts.
+// Keep the existing regex syntax but bound its synchronous execution time.
+const regexSearch = new Script("const pattern = new RegExp(query, 'i'); texts.map(text => pattern.test(text))");
+
 export function pathKey(path: string): string {
   try { return realpathSync(path); } catch { return resolve(path); }
 }
 
 export function buildTree(sessions: SessionInfo[]): { roots: Node[]; nodes: Map<string, Node> } {
+  const paths = new Map<string, string>();
+  const keyFor = (path: string) => {
+    let key = paths.get(path);
+    if (key === undefined) { key = pathKey(path); paths.set(path, key); }
+    return key;
+  };
   const nodes = new Map<string, Node>();
   for (const session of sessions) {
-    const key = pathKey(session.path);
+    const key = keyFor(session.path);
     if (!nodes.has(key)) nodes.set(key, { session, key, children: [], activity: session.modified.getTime() });
   }
   const roots: Node[] = [];
+  const parents = new Map<string, Node | undefined>();
+  const valid = new Map<string, boolean>();
+  for (const node of nodes.values()) parents.set(node.key, node.session.parentSessionPath ? nodes.get(keyFor(node.session.parentSessionPath)) : undefined);
   for (const node of nodes.values()) {
-    const parent = node.session.parentSessionPath ? nodes.get(pathKey(node.session.parentSessionPath)) : undefined;
-    // Corrupt/cyclic headers must not hide sessions or recurse indefinitely.
-    const seen = new Set([node.key]);
-    let ancestor = parent;
-    let cycle = false;
-    while (ancestor) {
-      if (seen.has(ancestor.key)) { cycle = true; break; }
-      seen.add(ancestor.key);
-      ancestor = ancestor.session.parentSessionPath ? nodes.get(pathKey(ancestor.session.parentSessionPath)) : undefined;
+    if (!valid.has(node.key)) {
+      const chain: Node[] = [];
+      const seen = new Set<string>();
+      let current: Node | undefined = node;
+      while (current && !valid.has(current.key) && !seen.has(current.key)) {
+        chain.push(current);
+        seen.add(current.key);
+        current = parents.get(current.key);
+      }
+      const acyclic = current === undefined || valid.get(current.key) === true;
+      for (const entry of chain) valid.set(entry.key, acyclic);
     }
-    if (parent && !cycle) { node.parent = parent; parent.children.push(node); }
+    const parent = parents.get(node.key);
+    if (parent && valid.get(node.key)) { node.parent = parent; parent.children.push(node); }
     else roots.push(node);
   }
-  const sort = (items: Node[]): number => {
-    let latest = 0;
-    for (const node of items) {
-      node.activity = Math.max(node.activity, sort(node.children));
-      latest = Math.max(latest, node.activity);
+  const pending = roots.map(node => ({ node, visited: false }));
+  while (pending.length) {
+    const { node, visited } = pending.pop()!;
+    if (!visited) {
+      pending.push({ node, visited: true });
+      for (const child of node.children) pending.push({ node: child, visited: false });
+    } else {
+      for (const child of node.children) node.activity = Math.max(node.activity, child.activity);
+      node.children.sort((a, b) => b.activity - a.activity);
     }
-    items.sort((a, b) => b.activity - a.activity);
-    return latest;
-  };
-  sort(roots);
+  }
+  roots.sort((a, b) => b.activity - a.activity);
   return { roots, nodes };
 }
 
 export function flatten(roots: Node[], expanded: Set<string>): Row[] {
   const rows: Row[] = [];
-  const walk = (node: Node, continuation: boolean[], last: boolean, root: boolean): void => {
+  const pending = roots.map((node, i) => ({ node, continuation: [] as boolean[], last: i === roots.length - 1, root: true, deep: false })).reverse();
+  while (pending.length) {
+    const { node, continuation, last, root, deep } = pending.pop()!;
     const disclosure = node.children.length ? (expanded.has(node.key) ? "▾ " : "▸ ") : "";
-    const branch = root ? "" : continuation.map((more) => more ? "│  " : "   ").join("") + (last ? "└─ " : "├─ ");
+    const branch = root ? "" : (deep ? "…  " : "") + continuation.map((more) => more ? "│  " : "   ").join("") + (last ? "└─ " : "├─ ");
     rows.push({ node, prefix: branch + disclosure });
     if (expanded.has(node.key)) {
-      node.children.forEach((child, i) => walk(child, root ? [] : [...continuation, !last], i === node.children.length - 1, false));
+      const next = root ? [] : [...continuation, !last];
+      for (let i = node.children.length - 1; i >= 0; i--) pending.push({ node: node.children[i]!, continuation: next.slice(-32), last: i === node.children.length - 1, root: false, deep: deep || next.length > 32 });
     }
-  };
-  roots.forEach((node, i) => walk(node, [], i === roots.length - 1, true));
+  }
   return rows;
 }
 
 export function expandSubtree(node: Node, expanded: Set<string>, open: boolean): void {
-  if (open) expanded.add(node.key); else expanded.delete(node.key);
-  for (const child of node.children) expandSubtree(child, expanded, open);
+  const pending = [node];
+  const visited = new Set<string>();
+  while (pending.length) {
+    const current = pending.pop()!;
+    if (visited.has(current.key)) continue;
+    visited.add(current.key);
+    if (open) expanded.add(current.key); else expanded.delete(current.key);
+    pending.push(...current.children);
+  }
 }
 
 export function search(sessions: SessionInfo[], query: string, sort: SortMode): SessionInfo[] {
@@ -78,8 +106,14 @@ export function search(sessions: SessionInfo[], query: string, sort: SortMode): 
   const trimmed = query.trim();
   if (!trimmed) return [...sessions].sort((a, b) => b.modified.getTime() - a.modified.getTime());
   if (trimmed.startsWith("re:")) {
-    try { const regex = new RegExp(trimmed.slice(3), "i"); return sessions.filter(session => regex.test(text(session))); }
-    catch { return []; }
+    try {
+      const matches = regexSearch.runInNewContext({ query: trimmed.slice(3), texts: sessions.map(text) }, { timeout: 100 }) as boolean[];
+      return sessions.filter((_session, i) => matches[i]);
+    }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ERR_SCRIPT_EXECUTION_TIMEOUT") throw new Error("Regex search exceeded 100 ms; simplify the expression");
+      return [];
+    }
   }
   const phrases: string[] = [];
   const fuzzy = trimmed.replace(/"([^"]*)"/g, (_match, phrase: string) => { phrases.push(phrase.toLowerCase().replace(/\s+/g, " ")); return " "; }).trim();

@@ -17,23 +17,11 @@
     context = ../agent-context.md;
 
     settings = {
-      # 项目级资源（.pi/settings.json、项目 skills 等）默认询问是否信任
-      defaultProjectTrust = "ask";
-
-      # （defaultProvider 必须与 defaultModel 一起设置，模型解析器两者都需要）
-      defaultProvider = "openai-codex";
-      defaultModel = "gpt-6-luna";
-      defaultThinkingLevel = "xhigh";
-
       # 思维链默认展开（false = 不隐藏 thinking 块）；ctrl+t / alt+t 可随时折叠/展开
       hideThinkingBlock = false;
 
       retry.enabled = true;
       retry.maxRetries = 5;
-
-      packages = [
-        "npm:pi-open-tui"
-      ];
     };
   };
 

@@ -2,7 +2,8 @@
 // - Global:  ~/.pi/agent/subagents.json (via getAgentDir()) — manual defaults, never written here
 // - Project: <cwd>/.pi/subagents.json — written by /agents → Settings; overrides global on load
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NO_FALLBACK } from "./agent-types.js";
@@ -465,12 +466,20 @@ export function loadSettings(cwd: string = process.cwd()): SubagentsSettings {
  */
 export function saveSettings(s: SubagentsSettings, cwd: string = process.cwd()): boolean {
   const path = projectPath(cwd);
+  const temporary = `${path}.${randomUUID()}.tmp`;
   try {
+    if (existsSync(path)) {
+      const current: unknown = JSON.parse(readFileSync(path, "utf8"));
+      if (current === null || typeof current !== "object" || Array.isArray(current)) return false;
+    }
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify(s, null, 2), "utf-8");
+    writeFileSync(temporary, JSON.stringify(s, null, 2), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    renameSync(temporary, path);
     return true;
   } catch {
     return false;
+  } finally {
+    try { unlinkSync(temporary); } catch { /* Renamed or never created. */ }
   }
 }
 

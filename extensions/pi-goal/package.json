@@ -1,6 +1,6 @@
 {
   "name": "@narumitw/pi-goal",
-  "version": "0.54.8-local.1",
+  "version": "0.54.8-local.2",
   "description": "Local Pi Goal extension with model-neutral unused sessions.",
   "type": "module",
   "license": "MIT",

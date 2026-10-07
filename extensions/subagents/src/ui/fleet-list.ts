@@ -18,6 +18,8 @@ import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
+import { widgetCollapseHint } from "./widget-collapse.js";
+import { stripVTControlCharacters } from "node:util";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -27,6 +29,8 @@ const MAX_AGENT_ROWS = 5;
 const TICK_MS = 200;
 /** How long a finished agent lingers in the list before it drops out. */
 const FINISHED_LINGER_MS = 4000;
+const oneLine = (text: string) => stripVTControlCharacters(text)
+  .replace(/[\p{Cc}\u200E\u200F\u202A-\u202E\u2066-\u2069]+/gu, " ");
 
 /** Minimal UI surface the FleetView needs from `ctx.ui` (structural subset). */
 export type FleetUICtx = {
@@ -104,6 +108,8 @@ export class FleetList {
   private timer: ReturnType<typeof setInterval> | undefined;
 
   private enabled = true;
+  private collapsed = false;
+  private disposed = false;
   /** Whether arrow keys currently navigate the list (vs. flow to the editor). */
   private active = false;
   /** 0 = `main`, 1..N = subagents. */
@@ -155,8 +161,26 @@ export class FleetList {
     this.update();
   }
 
+  setCollapsed(collapsed: boolean): void {
+    if (this.collapsed === collapsed) return;
+    this.collapsed = collapsed;
+    if (collapsed) this.active = false;
+    this.update();
+  }
+
+  resetSession(): void {
+    this.viewerClose?.();
+    this.viewerClose = undefined;
+    this.viewingAgentId = undefined;
+    this.viewingWorkflowId = undefined;
+    this.active = false;
+    this.selectedIndex = 0;
+    this.update();
+  }
+
   /** Capture the UI context and (re)register the global input handler. */
   setUICtx(ui: FleetUICtx): void {
+    if (this.disposed) return;
     if (ui === this.ui) return;
     this.inputUnsub?.();
     this.ui = ui;
@@ -167,6 +191,7 @@ export class FleetList {
 
   /** Ensure the re-render timer is running (called when an agent spawns). */
   ensureTimer(): void {
+    if (this.disposed) return;
     if (!this.timer) this.timer = setInterval(() => this.update(), TICK_MS);
   }
 
@@ -179,6 +204,7 @@ export class FleetList {
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
     this.inputUnsub?.();
     this.inputUnsub = undefined;
@@ -197,7 +223,7 @@ export class FleetList {
 
   /** Re-register/refresh the below-editor widget; clears it when nothing remains. */
   update(): void {
-    if (!this.ui) return;
+    if (this.disposed || !this.ui) return;
     // The fleet list is behind the same modal/preview overlays as the agent
     // widget. Do not let its 200 ms clock repaint the hidden root tree; the
     // first update after the overlay closes catches up with the roster.
@@ -310,7 +336,7 @@ export class FleetList {
 
   /** Returns `{consume:true}` to swallow a key, or undefined to let it through. */
   handleKey(data: string): { consume?: boolean; data?: string } | undefined {
-    if (!this.enabled || !this.ui) return undefined;
+    if (this.disposed || this.collapsed || !this.enabled || !this.ui) return undefined;
     // Input listeners receive BOTH key-press and key-release (the kitty protocol
     // emits both, and matchesKey matches either) — act on press only, or every
     // tap would move/fire twice. Repeats still pass through for held-key nav.
@@ -464,6 +490,15 @@ export class FleetList {
   private renderBar(width: number, theme: Theme): string[] {
     const rows = this.roster().slice(1) as (WorkflowEntry | AgentEntry)[];
     if (rows.length === 0) return [];
+    if (this.collapsed) {
+      const agents = rows.filter(row => row.kind === "agent").length;
+      const workflows = rows.length - agents;
+      const summary = [
+        ...(agents ? [`${agents} agent${agents === 1 ? "" : "s"}`] : []),
+        ...(workflows ? [`${workflows} workflow${workflows === 1 ? "" : "s"}`] : []),
+      ].join(", ");
+      return [truncateToWidth(`  ${theme.fg("dim", summary)}${widgetCollapseHint(theme)}`, width)];
+    }
     // Clamp locally so a render between a roster shrink and the next update()
     // (e.g. on terminal resize) never loses the selection marker.
     const sel = Math.min(this.selectedIndex, rows.length);
@@ -514,7 +549,7 @@ export class FleetList {
   ): string {
     const selected = rosterIndex === sel;
     const kind = theme.fg(selected ? "text" : "muted", "workflow");
-    const name = selected ? theme.fg("text", workflow.name) : workflow.name;
+    const name = selected ? theme.fg("text", oneLine(workflow.name)) : oneLine(workflow.name);
     const left = `  ${this.bullet(rosterIndex, sel, theme)} ${kind}  ${name}`;
     // Frozen once the run settles, exactly as an agent's clock is.
     const elapsed = (workflow.completedAt ?? Date.now()) - workflow.startedAt;
@@ -532,7 +567,7 @@ export class FleetList {
     const name = renderAgentName(record.type, theme, selected
       ? { fallbackColor: "text", bold: hasAgentBadge(record.type) }
       : { fallbackColor: "muted" });
-    const description = selected ? theme.fg("text", record.description) : record.description;
+    const description = selected ? theme.fg("text", oneLine(record.description)) : oneLine(record.description);
     const left = `  ${this.bullet(rosterIndex, sel, theme)} ${name}  ${description}`;
     // The record, not the activity tracker — see the note in AgentWidget's
     // running line: only the record carries a nested child's spend, and only it

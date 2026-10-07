@@ -90,7 +90,7 @@ Your final message is the workflow return value. Return only the requested answe
   // message itself, just as OpenCode's Task tool injects its final text.
   const resultContract = extras?.workflowChild
     ? ""
-    : `\n\n<subagent_result_contract>\nYour final message is delivered to the parent. Return the requested result and concise findings directly; artifact links may supplement it.\n</subagent_result_contract>`;
+    : `\n\n<subagent_result_contract>\nYour final message is delivered to the parent. Return the requested result and concise findings directly; artifact links may supplement it. When a large file artifact is requested, write it in small verified chunks instead of one large tool call.\n</subagent_result_contract>`;
 
   // Build optional extras suffix
   const extraSections: string[] = [];

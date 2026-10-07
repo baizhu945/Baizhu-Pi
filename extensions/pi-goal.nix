@@ -17,7 +17,7 @@ let
 
   piGoalLocal = pkgs.stdenvNoCC.mkDerivation {
     pname = "pi-goal-local";
-    version = "0.54.8-local.1";
+    version = "0.54.8-local.2";
     src = ./pi-goal;
     nativeBuildInputs = [ pkgs.gnutar pkgs.nodejs ];
     dontConfigure = true;

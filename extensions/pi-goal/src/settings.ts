@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { withFileLock } from "./file-lock.js";
 
 export const GOAL_SETTINGS_FILE = "pi-goal.json";
 
@@ -91,6 +92,10 @@ export function saveGoalSettings(
   settingsPath = join(getAgentDir(), GOAL_SETTINGS_FILE),
   overrides: Partial<GoalSettingsSaveFileSystem> = {},
 ) {
+  return withFileLock(settingsPath, () => saveLockedGoalSettings(settings, settingsPath, overrides));
+}
+
+function saveLockedGoalSettings(settings: GoalSettings, settingsPath: string, overrides: Partial<GoalSettingsSaveFileSystem>) {
   const normalized = normalizeGoalSettings(settings);
   if (!normalized) throw new Error("Refusing to save invalid pi-goal settings.");
 
@@ -127,7 +132,7 @@ export function saveGoalSettings(
   const temporaryPath = join(dirname(settingsPath), `.${basename(settingsPath)}.${randomUUID()}.tmp`);
   try {
     fs.mkdirSync(dirname(settingsPath), { recursive: true });
-    fs.writeFileSync(temporaryPath, document, { encoding: "utf8", flag: "wx" });
+    fs.writeFileSync(temporaryPath, document, { encoding: "utf8", flag: "wx", mode: 0o600 });
     fs.renameSync(temporaryPath, settingsPath);
   } finally {
     try {

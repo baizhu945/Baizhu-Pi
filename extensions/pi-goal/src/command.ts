@@ -102,7 +102,7 @@ function tokenize(input: string): string[] {
       else current += char;
       continue;
     }
-    if (char === '"' || char === "'") {
+    if ((char === '"' || char === "'") && current.length === 0) {
       quote = char;
       continue;
     }

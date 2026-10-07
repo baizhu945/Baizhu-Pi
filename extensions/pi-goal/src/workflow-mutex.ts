@@ -16,15 +16,14 @@ export class WorkflowMutex {
   private readonly heldGroups = new Map<string, WorkflowMutexOwner>();
   private generation = 0;
   private readonly pi: Pick<ExtensionAPI, "events">;
+  private unsubscribe: (() => void) | undefined;
 
   constructor(pi: Pick<ExtensionAPI, "events">) {
     this.pi = pi;
-    pi.events.on(WORKFLOW_MUTEX_CHANNEL, (payload) => {
-      this.answer(payload);
-    });
   }
 
   bindSession(session: object): void {
+    this.unsubscribe ??= this.pi.events.on(WORKFLOW_MUTEX_CHANNEL, payload => this.answer(payload));
     this.generation += 1;
     this.heldGroups.clear();
     this.session = session;
@@ -35,6 +34,8 @@ export class WorkflowMutex {
     this.generation += 1;
     this.heldGroups.clear();
     this.session = undefined;
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
   }
 
   acquire(group = AGENT_WORKFLOW_GROUP): WorkflowMutexOwner | undefined {

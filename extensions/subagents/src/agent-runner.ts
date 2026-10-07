@@ -28,7 +28,7 @@ import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
-import type { SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
 import type { LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 
@@ -352,6 +352,8 @@ export interface RunOptions {
   pi: ExtensionAPI;
   /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explore#a1b2c3d4`). */
   agentId?: string;
+  /** Trusted per-invocation definition resolved in a nested branch's config root. */
+  agentConfig?: AgentConfig;
   model?: Model<any>;
   signal?: AbortSignal;
   isolated?: boolean;
@@ -537,6 +539,25 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
   return undefined;
 }
 
+/** Correct the repeated large-output strategy before Pi's existing retry. */
+const IDLE_TIMEOUT_RECOVERY_PROMPT = `The previous model response failed with an upstream idle timeout.
+Continue the assigned task from the existing context; do not repeat completed analysis.
+If the task requires a large file, write or append small chunks (about 100 lines per tool call), rather than generating the whole artifact in one response.
+Before continuing a file, check what was actually saved: an interrupted tool call may not have executed. Preserve completed work and avoid duplicate sections.
+Finish with the requested final answer or structured output. Do not claim completion until the required work is done.`;
+
+function installIdleTimeoutRecovery(session: AgentSession, signal?: AbortSignal): () => void {
+  let queued = false;
+  return session.subscribe((event: AgentSessionEvent) => {
+    if (event.type !== "auto_retry_start" || queued || signal?.aborted) return;
+    if (!/\bidle[\s_-]+timeout\b/i.test(event.errorMessage)) return;
+    queued = true;
+    // Use the public steering queue, so it is projected into the next existing
+    // retry. Do not add a new retry loop, change the model or replay tool calls.
+    void session.steer(IDLE_TIMEOUT_RECOVERY_PROMPT, undefined, { source: "extension" }).catch(() => {});
+  });
+}
+
 /**
  * Wire an AbortSignal to abort a session.
  * Returns a cleanup function to remove the listener.
@@ -569,8 +590,9 @@ export async function runAgent(
   prompt: string,
   options: RunOptions,
 ): Promise<RunResult> {
-  const config = getConfig(type);
-  const agentConfig = getAgentConfig(type);
+  options.signal?.throwIfAborted();
+  const agentConfig = options.agentConfig ?? getAgentConfig(type);
+  const config = options.agentConfig ?? getConfig(type);
 
   // Resolve working directory: worktree override > parent cwd
   const effectiveCwd = options.cwd ?? ctx.cwd;
@@ -579,6 +601,7 @@ export async function runAgent(
   const configCwd = options.configCwd ?? effectiveCwd;
 
   const env = await detectEnv(options.pi, effectiveCwd);
+  options.signal?.throwIfAborted();
 
   // Get parent system prompt for append-mode agents
   const parentSystemPrompt = ctx.getSystemPrompt();
@@ -603,7 +626,9 @@ export async function runAgent(
     }
   }
 
-  let toolNames = getToolNamesForType(type);
+  let toolNames = options.agentConfig
+    ? options.agentConfig.builtinToolNames ?? [...BUILTIN_TOOL_NAMES]
+    : getToolNamesForType(type);
 
   // Persistent memory: detect write capability and branch accordingly.
   // Account for disallowedTools — a tool in the base set but on the denylist is not truly available.
@@ -718,6 +743,7 @@ export async function runAgent(
     allowExtensionTools: !noExtensions,
   };
   await runInChildSessionContext(() => loader.reload(), childLoaderPolicy);
+  options.signal?.throwIfAborted();
 
   // Plain entries in `tools:` are expected to be built-in names (extension tools
   // go through `ext:`), so an unknown name there is unambiguously a typo. Previously
@@ -973,6 +999,10 @@ export async function runAgent(
     () => createAgentSession(sessionOpts),
     childSessionPolicy,
   );
+  if (options.signal?.aborted) {
+    session.dispose();
+    options.signal.throwIfAborted();
+  }
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(
@@ -1051,6 +1081,7 @@ export async function runAgent(
 
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
+  const cleanupRecovery = installIdleTimeoutRecovery(session, options.signal);
 
   // Build the effective prompt: optionally prepend parent context
   let effectivePrompt = prompt;
@@ -1066,6 +1097,7 @@ export async function runAgent(
   const startLen = session.messages.length;
   let structuredRetried = false;
   try {
+    options.signal?.throwIfAborted();
     await session.prompt(effectivePrompt);
 
     // One more prompt when a schema was asked for and nothing usable came back
@@ -1074,7 +1106,7 @@ export async function runAgent(
     // the abort forwarding are still live: torn down first, a retry would be
     // unkillable.
     if (structuredCapture !== undefined && structuredCapture.json === undefined
-      && options.signal?.aborted !== true) {
+      && options.signal?.aborted !== true && finalTurnError(session, startLen) === undefined) {
       structuredRetried = true;
       await session.prompt(structuredRetryPrompt(structuredCapture));
     }
@@ -1082,6 +1114,7 @@ export async function runAgent(
     unsubTurns();
     collector.unsubscribe();
     cleanupAbort();
+    cleanupRecovery();
   }
 
   const responseText = collector.getText().trim() || getLastAssistantText(session, startLen);
@@ -1115,12 +1148,14 @@ export async function resumeAgent(
     signal?: AbortSignal;
   } = {},
 ): Promise<{ text: string; failure?: string }> {
+  options.signal?.throwIfAborted();
   // Boundary for the history fallback: the session already holds prior turns,
   // so only assistant text produced by THIS resume prompt counts as its output
   // — a failed resume must not surface the previous turn's answer (#144).
   const startLen = session.messages.length;
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
+  const cleanupRecovery = installIdleTimeoutRecovery(session, options.signal);
 
   const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction)
     ? session.subscribe((event: AgentSessionEvent) => {
@@ -1143,11 +1178,13 @@ export async function resumeAgent(
     : () => {};
 
   try {
+    options.signal?.throwIfAborted();
     await session.prompt(prompt);
   } finally {
     collector.unsubscribe();
     unsubEvents();
     cleanupAbort();
+    cleanupRecovery();
   }
 
   return {

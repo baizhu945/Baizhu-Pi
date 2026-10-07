@@ -9,6 +9,7 @@ import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { safePathId } from "./path-id.js";
 
 /**
  * Project/global default for writing a subagent's `.output` transcript; a custom
@@ -45,7 +46,7 @@ export function encodeCwd(cwd: string): string {
  * iterating on one is edit-file-then-rerun — the same convention, one directory.
  */
 export function sessionTaskDir(cwd: string, sessionId: string): string {
-  const encoded = encodeCwd(cwd);
+  const encoded = safePathId(encodeCwd(cwd));
   const root = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`);
   mkdirSync(root, { recursive: true, mode: 0o700 });
   // chmod is a no-op on Windows and throws on some Windows filesystems.
@@ -55,14 +56,14 @@ export function sessionTaskDir(cwd: string, sessionId: string): string {
   } catch (err) {
     if (process.platform !== "win32") throw err;
   }
-  const dir = join(root, encoded, sessionId, "tasks");
+  const dir = join(root, encoded, safePathId(sessionId), "tasks");
   mkdirSync(dir, { recursive: true });
   return dir;
 }
 
 /** Create the output file path, ensuring the directory exists. */
 export function createOutputFilePath(cwd: string, agentId: string, sessionId: string): string {
-  return join(sessionTaskDir(cwd, sessionId), `${agentId}.output`);
+  return join(sessionTaskDir(cwd, sessionId), `${safePathId(agentId)}.output`);
 }
 
 /**

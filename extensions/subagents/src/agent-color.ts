@@ -7,6 +7,7 @@
  * Agents uses, so those definitions render as written.
  */
 
+import { stripVTControlCharacters } from "node:util";
 import { getConfig } from "./agent-types.js";
 
 const NAMED_AGENT_COLORS: Readonly<Record<string, string>> = {
@@ -125,6 +126,7 @@ export function renderAgentNameLabel(
   theme: AgentNameTheme,
   style: AgentNameStyle = {},
 ): string {
+  name = stripVTControlCharacters(name).replace(/[\p{Cc}\u200E\u200F\u202A-\u202E\u2066-\u2069]+/gu, " ");
   const resolved = resolveAgentColor(color);
   if (!resolved) {
     const text = style.bold ? theme.bold(name) : name;

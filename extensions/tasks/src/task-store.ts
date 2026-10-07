@@ -42,7 +42,8 @@ function acquireLock(lockPath: string): string {
           // but only after a couple of polls: the file is created before the PID is
           // written to it, so a live acquirer can look unparseable for a moment —
           // one that crashed in that window looks that way forever.
-          if (pid > 0 ? !isProcessRunning(pid) : i >= 2) {
+          const validPid = Number.isSafeInteger(pid) && pid > 0 && pid <= 2_147_483_647;
+          if (validPid ? !isProcessRunning(pid) : i >= 2) {
             unlinkSync(lockPath);
             continue;
           }
@@ -72,7 +73,9 @@ function releaseLock(lockPath: string, token: string): void {
 }
 
 function isProcessRunning(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  try { process.kill(pid, 0); return true; } catch (error) {
+    return !(error instanceof Error && "code" in error && error.code === "ESRCH");
+  }
 }
 
 /**
@@ -86,11 +89,13 @@ function normalizeTask(t: Task): Task {
   const now = Date.now();
   return {
     ...t,
+    activeForm: typeof t.activeForm === "string" ? t.activeForm : undefined,
+    owner: typeof t.owner === "string" ? t.owner : undefined,
     metadata: t.metadata && typeof t.metadata === "object" && !Array.isArray(t.metadata) ? t.metadata : {},
-    blocks: Array.isArray(t.blocks) ? t.blocks : [],
-    blockedBy: Array.isArray(t.blockedBy) ? t.blockedBy : [],
-    createdAt: typeof t.createdAt === "number" ? t.createdAt : now,
-    updatedAt: typeof t.updatedAt === "number" ? t.updatedAt : now,
+    blocks: Array.isArray(t.blocks) ? t.blocks.filter(id => typeof id === "string") : [],
+    blockedBy: Array.isArray(t.blockedBy) ? t.blockedBy.filter(id => typeof id === "string") : [],
+    createdAt: Number.isFinite(t.createdAt) ? t.createdAt : now,
+    updatedAt: Number.isFinite(t.updatedAt) ? t.updatedAt : now,
   };
 }
 
@@ -123,30 +128,44 @@ export class TaskStore {
    * counter produced the task ID "NaN", then IDs restarting at "0" and colliding
    * with live tasks. Anything unusable now leaves the current state alone.
    */
-  private load(): void {
+  private load(strict = false): void {
     if (!this.filePath) return;
-    if (!existsSync(this.filePath)) return;
+    if (!existsSync(this.filePath)) {
+      this.tasks.clear();
+      this.nextId = 1;
+      return;
+    }
     try {
       const data: unknown = JSON.parse(readFileSync(this.filePath, "utf-8"));
-      if (!data || typeof data !== "object") return;
+      if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Invalid task store");
       const { nextId, tasks } = data as Partial<TaskStoreData>;
-      if (!Array.isArray(tasks)) return;
+      if (!Array.isArray(tasks)) throw new Error("Invalid task array");
 
       // Build the replacement before touching the live state, so a bad record
       // can't leave the store half-loaded.
       const loaded = new Map<string, Task>();
       let maxId = 0;
       for (const t of tasks) {
-        if (!t || typeof t !== "object" || typeof t.id !== "string") continue;
+        if (!t || typeof t !== "object" || typeof t.id !== "string"
+          || typeof t.subject !== "string" || typeof t.description !== "string"
+          || !["pending", "in_progress", "completed"].includes(t.status)) {
+          if (strict) throw new Error("Invalid task record");
+          continue;
+        }
+        if (strict && loaded.has(t.id)) throw new Error("Duplicate task ID");
         loaded.set(t.id, normalizeTask(t));
         const numericId = Number(t.id);
-        if (Number.isFinite(numericId) && numericId > maxId) maxId = numericId;
+        if (Number.isSafeInteger(numericId) && numericId > maxId) maxId = numericId;
       }
       this.tasks = loaded;
       // Every future task ID comes from this counter, so it has to clear the IDs
       // already in use — whether the file omitted it or recorded a stale one.
-      this.nextId = typeof nextId === "number" && Number.isInteger(nextId) && nextId > maxId ? nextId : maxId + 1;
-    } catch { /* unreadable or not JSON — keep the state we have */ }
+      this.nextId = typeof nextId === "number" && Number.isSafeInteger(nextId) && nextId > maxId ? nextId : maxId + 1;
+    } catch {
+      // Read-only UI can keep its last valid view. Mutations must not overwrite
+      // a damaged file with that stale cache or an apparently empty list.
+      if (strict) throw new Error(`Refusing to overwrite unreadable or malformed task store: ${this.filePath}`);
+    }
   }
 
   /** Write store to disk atomically (file-backed mode only). */
@@ -157,9 +176,13 @@ export class TaskStore {
       tasks: Array.from(this.tasks.values()),
     };
     mkdirSync(dirname(this.filePath), { recursive: true });
-    const tmpPath = this.filePath + ".tmp";
-    writeFileSync(tmpPath, JSON.stringify(data, null, 2));
-    renameSync(tmpPath, this.filePath);
+    const tmpPath = `${this.filePath}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(tmpPath, JSON.stringify(data, null, 2), { flag: "wx", mode: 0o600 });
+      renameSync(tmpPath, this.filePath);
+    } finally {
+      try { unlinkSync(tmpPath); } catch { /* renamed or never created */ }
+    }
   }
 
   /** Execute a mutation with file locking (if file-backed). */
@@ -167,7 +190,7 @@ export class TaskStore {
     if (!this.lockPath) return fn();
     const token = acquireLock(this.lockPath);
     try {
-      this.load(); // Re-read latest state
+      this.load(true); // Re-read latest state; never overwrite damaged data.
       const result = fn();
       this.save();
       return result;
@@ -178,6 +201,9 @@ export class TaskStore {
 
   create(subject: string, description: string, activeForm?: string, metadata?: Record<string, any>): Task {
     return this.withLock(() => {
+      if (!Number.isSafeInteger(this.nextId) || this.nextId < 1) {
+        throw new Error("Task ID counter exhausted; refusing to reuse an existing ID");
+      }
       const now = Date.now();
       const task: Task = {
         id: String(this.nextId++),
@@ -263,7 +289,7 @@ export class TaskStore {
           if (value === null) {
             delete task.metadata[key];
           } else {
-            task.metadata[key] = value;
+            Object.defineProperty(task.metadata, key, { value, enumerable: true, writable: true, configurable: true });
           }
         }
         changedFields.push("metadata");
@@ -345,25 +371,33 @@ export class TaskStore {
   /** Capture full store state — used to carry tasks into a forked session. */
   snapshot(): TaskStoreData {
     if (this.filePath) this.load();
-    return { nextId: this.nextId, tasks: Array.from(this.tasks.values()) };
+    return structuredClone({ nextId: this.nextId, tasks: Array.from(this.tasks.values()) });
   }
 
   /** Seed an empty store from a snapshot. No-op if the store already has tasks,
    *  so re-pointing to an already-seeded fork file never duplicates. */
   seed(data: TaskStoreData): void {
-    if (this.tasks.size > 0) return;
     this.withLock(() => {
-      this.nextId = data.nextId;
+      if (this.tasks.size > 0) return;
+      const snapshot = structuredClone(data);
+      this.nextId = snapshot.nextId;
       this.tasks.clear();
-      for (const t of data.tasks) this.tasks.set(t.id, t);
+      for (const t of snapshot.tasks) this.tasks.set(t.id, t);
     });
   }
 
   /** Delete the backing file (if file-backed and empty). */
   deleteFileIfEmpty(): boolean {
-    if (!this.filePath || this.tasks.size > 0) return false;
-    try { unlinkSync(this.filePath); } catch { /* ignore */ }
-    return true;
+    if (!this.filePath || !this.lockPath || !existsSync(this.filePath)) return false;
+    const token = acquireLock(this.lockPath);
+    try {
+      this.load(true);
+      if (this.tasks.size > 0) return false;
+      unlinkSync(this.filePath);
+      return true;
+    } finally {
+      releaseLock(this.lockPath, token);
+    }
   }
 
   /** Remove all completed tasks. */

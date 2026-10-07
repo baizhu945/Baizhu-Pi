@@ -6,11 +6,13 @@
  */
 
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import { stripVTControlCharacters } from "node:util";
 import { renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
 import type { AgentInvocation, SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
+import { widgetCollapseHint } from "./widget-collapse.js";
 
 // ---- Constants ----
 
@@ -22,6 +24,8 @@ export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 
 /** Statuses that indicate an error/non-success outcome (used for linger behavior and icon rendering). */
 export const ERROR_STATUSES = new Set(["error", "aborted", "steered", "stopped"]);
+const oneLine = (text: string) => stripVTControlCharacters(text)
+  .replace(/[\p{Cc}\u200E\u200F\u202A-\u202E\u2066-\u2069]+/gu, " ");
 
 /** Tool name → human-readable action for activity descriptions. */
 const TOOL_DISPLAY: Record<string, string> = {
@@ -261,6 +265,8 @@ export class AgentWidget {
   private tui: any | undefined;
   /** Last status bar text, used to avoid redundant setStatus calls. */
   private lastStatusText: string | undefined;
+  private collapsed = false;
+  private disposed = false;
 
   constructor(
     private manager: AgentManager,
@@ -309,6 +315,7 @@ export class AgentWidget {
 
   /** Set the UI context (grabbed from first tool execution). */
   setUICtx(ctx: UICtx) {
+    if (this.disposed) return;
     if (ctx !== this.uiCtx) {
       // UICtx changed — the widget registered on the old context is gone.
       // Force re-registration on next update().
@@ -317,6 +324,18 @@ export class AgentWidget {
       this.tui = undefined;
       this.lastStatusText = undefined;
     }
+  }
+
+  setCollapsed(collapsed: boolean) {
+    if (this.collapsed === collapsed) return;
+    this.collapsed = collapsed;
+    this.update();
+  }
+
+  resetSession() {
+    this.finishedTurnAge.clear();
+    this.widgetFrame = 0;
+    this.update();
   }
 
   /**
@@ -334,6 +353,7 @@ export class AgentWidget {
 
   /** Ensure the widget update timer is running. */
   ensureTimer() {
+    if (this.disposed) return;
     if (!this.widgetInterval) {
       this.widgetInterval = setInterval(() => this.update(), 80);
     }
@@ -382,7 +402,7 @@ export class AgentWidget {
       statusText = theme.fg("dim", " stopped");
     } else if (a.status === "error") {
       icon = theme.fg("error", "✗");
-      const errMsg = a.error ? `: ${a.error.slice(0, 60)}` : "";
+      const errMsg = a.error ? `: ${oneLine(a.error).slice(0, 60)}` : "";
       statusText = theme.fg("error", ` error${errMsg}`);
     } else {
       // aborted
@@ -402,7 +422,7 @@ export class AgentWidget {
     parts.push(duration);
 
     const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
-    return `${icon} ${renderAgentName(a.type, theme, { fallbackColor: "dim" })}${modeTag}  ${theme.fg("dim", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", parts.join(" · "))}${statusText}`;
+    return `${icon} ${renderAgentName(a.type, theme, { fallbackColor: "dim" })}${modeTag}  ${theme.fg("dim", oneLine(a.description))} ${theme.fg("dim", "·")} ${theme.fg("dim", parts.join(" · "))}${statusText}`;
   }
 
   /**
@@ -429,6 +449,16 @@ export class AgentWidget {
     const headingColor = hasActive ? "accent" : "dim";
     const headingIcon = hasActive ? "●" : "○";
     const frame = SPINNER[this.widgetFrame % SPINNER.length];
+
+    if (this.collapsed) {
+      const counts = [
+        ...(running.length ? [`${running.length} running`] : []),
+        ...(queued.length ? [`${queued.length} queued`] : []),
+        ...(finished.length ? [`${finished.length} finished`] : []),
+      ].join(", ");
+      return [truncate(theme.fg(headingColor, headingIcon) + " "
+        + theme.fg(headingColor, `Agents (${counts})`) + widgetCollapseHint(theme))];
+    }
 
     // Build sections separately for overflow-aware assembly.
     // Each running agent = 2 lines (header + activity), finished = 1 line, queued = 1 line.
@@ -472,10 +502,10 @@ export class AgentWidget {
       parts.push(elapsed);
       const statsText = parts.join(" · ");
 
-      const activity = bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…";
+      const activity = bg ? oneLine(describeActivity(bg.activeTools, bg.responseText)) : "thinking…";
 
       runningLines.push([
-        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${renderAgentName(a.type, theme, { bold: true })}${modeTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
+        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${renderAgentName(a.type, theme, { bold: true })}${modeTag}  ${theme.fg("muted", oneLine(a.description))} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
         truncate(theme.fg("dim", "│  ") + theme.fg("dim", `  ⎿  ${activity}`)),
       ]);
     }
@@ -568,7 +598,7 @@ export class AgentWidget {
 
   /** Force an immediate widget update. */
   update() {
-    if (!this.uiCtx) return;
+    if (this.disposed || !this.uiCtx) return;
     // The widget is behind modal/preview overlays. Updating it at 80 ms while
     // hidden only schedules another full root-layout render; the next tick after
     // the overlay closes will reconcile all current state.
@@ -643,6 +673,7 @@ export class AgentWidget {
   }
 
   dispose() {
+    this.disposed = true;
     if (this.widgetInterval) {
       clearInterval(this.widgetInterval);
       this.widgetInterval = undefined;
@@ -654,5 +685,6 @@ export class AgentWidget {
     this.widgetRegistered = false;
     this.tui = undefined;
     this.lastStatusText = undefined;
+    this.uiCtx = undefined;
   }
 }

@@ -135,6 +135,11 @@ await test('real Pi: activation adds exactly two tools; same-lead single mode re
   const active = await view(loaded);
   assert.deepEqual(active.tools.map(tool => tool.name), [...baseline.tools.map(tool => tool.name), 'sidekick', 'read_subagent']);
   assert.match(active.prompt, /You are powered by Fusion/);
+  assert.match(active.prompt, /Fusion lead is coordination-only/);
+  assert.match(active.prompt, /no execution exceptions while Fusion is active/);
+  const handoff = active.tools.find(tool => tool.name === 'sidekick');
+  assert.match(handoff.description, /Delegate all task execution/);
+  assert.match(handoff.parameters.properties.message.description, /the lead does not execute task work/);
   assert.deepEqual(active.skills, baseline.skills);
   assert.deepEqual(active.templates, baseline.templates);
   const marker = loaded.session.sessionManager.getBranch().findLast(entry => entry.type === 'custom' && entry.customType === 'fusion-session-state');

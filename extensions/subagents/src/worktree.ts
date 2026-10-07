@@ -59,6 +59,8 @@ export interface WorktreeCleanupResult {
   branch?: string;
   /** Worktree path if it was kept. */
   path?: string;
+  /** Cleanup failed; the original worktree is preserved for recovery. */
+  error?: string;
 }
 
 /**
@@ -174,10 +176,14 @@ export async function cleanupWorktree(
       branch: worktree.branch,
       path: worktree.path,
     };
-  } catch {
-    // Best effort cleanup on error
-    try { await removeWorktree(pi, cwd, worktree.path); } catch { /* ignore */ }
-    return { hasChanges: false };
+  } catch (error) {
+    // A failed status/commit/branch operation is not proof of an empty tree.
+    // Preserve it: force-removing here would destroy uncommitted child work.
+    return {
+      hasChanges: true,
+      path: worktree.path,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 

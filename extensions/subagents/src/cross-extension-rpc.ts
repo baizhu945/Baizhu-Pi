@@ -158,6 +158,12 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
           }
           model = resolved;
           normalizedOptions = { ...normalizedOptions, model: resolved };
+        } else {
+          // JSON callers may supply just provider/id. Resolve the complete,
+          // configured model instead of trusting payload endpoints or headers.
+          model = modelRegistry.find(override.provider, override.id);
+          if (!model) throw new Error(`Model override "${label}" is not registered`);
+          normalizedOptions = { ...normalizedOptions, model };
         }
 
         // A model on the RPC payload is an orchestrator-level choice, exactly

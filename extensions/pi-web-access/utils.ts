@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { homedir, hostname, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,6 +48,7 @@ export function isLoopbackHostname(hostnameValue: string): boolean {
 	const normalized = hostnameValue.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
 	return normalized === "localhost"
 		|| normalized === "::1"
+		|| /^::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}$/.test(normalized)
 		|| (isIP(normalized) === 4 && normalized.split(".", 1)[0] === "127");
 }
 
@@ -88,6 +89,7 @@ export function resolveApiBaseUrl(options: ApiBaseUrlOptions): string {
 const API_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const API_REQUEST_BODY_HEADERS = ["Content-Encoding", "Content-Language", "Content-Location", "Content-Type"];
 const MAX_API_REDIRECTS = 5;
+const MAX_PROXY_RESPONSE_BYTES = 32 * 1024 * 1024;
 
 export async function fetchWithCredentialRedirects(
 	url: string,
@@ -103,6 +105,7 @@ export async function fetchWithCredentialRedirects(
 
 		const location = response.headers.get("location");
 		if (!location) return response;
+		await response.body?.cancel().catch(() => {});
 		if (redirects === MAX_API_REDIRECTS) {
 			throw new Error(`Too many API redirects from ${url}`);
 		}
@@ -218,7 +221,9 @@ export function mapFfmpegError(err: unknown): string {
 	return snippet ? `ffmpeg failed: ${snippet}` : "ffmpeg failed";
 }
 
-const proxyStorage = new AsyncLocalStorage<string | null>();
+const PROXY_STORAGE_KEY = Symbol.for("pi-web-access.proxy-storage.v1");
+const proxyHolder = globalThis as typeof globalThis & { [PROXY_STORAGE_KEY]?: AsyncLocalStorage<string | null> };
+const proxyStorage = proxyHolder[PROXY_STORAGE_KEY] ??= new AsyncLocalStorage<string | null>();
 
 export function normalizeProxyUrl(value: unknown, source: string): string | null {
 	if (value === undefined || value === null) return null;
@@ -229,14 +234,14 @@ export function normalizeProxyUrl(value: unknown, source: string): string | null
 	try {
 		parsed = new URL(trimmed);
 	} catch {
-		throw new Error(`${source} must be a valid proxy URL: ${JSON.stringify(trimmed)}`);
+		throw new Error(`${source} must be a valid proxy URL`);
 	}
 	if (parsed.protocol !== "http:" && parsed.protocol !== "https:" &&
 		parsed.protocol !== "socks4:" && parsed.protocol !== "socks4a:" &&
 		parsed.protocol !== "socks5:" && parsed.protocol !== "socks5h:") {
-		throw new Error(`${source} must use the http://, https://, or socks scheme: ${trimmed}`);
+		throw new Error(`${source} must use the http://, https://, or socks scheme`);
 	}
-	if (!parsed.hostname) throw new Error(`${source} must include a proxy host: ${trimmed}`);
+	if (!parsed.hostname) throw new Error(`${source} must include a proxy host`);
 	parsed.hash = "";
 	parsed.search = "";
 	return parsed.toString();
@@ -286,17 +291,23 @@ export function hasScopedProxyDecision(): boolean {
 	return proxyStorage.getStore() !== undefined;
 }
 
-function noProxyEntryMatches(hostname: string, entry: string): boolean {
+function noProxyEntryMatches(hostname: string, port: string, entry: string): boolean {
 	if (!entry) return false;
 	if (entry === "*") return true;
 	let host = entry;
+	let entryPort: string | undefined;
 	if (host.startsWith("[")) {
 		const close = host.indexOf("]");
-		if (close > 0) host = host.slice(0, close + 1);
+		if (close > 0) {
+			const suffix = host.slice(close + 1);
+			if (/^:\d+$/.test(suffix)) entryPort = suffix.slice(1);
+			host = host.slice(0, close + 1);
+		}
 	} else {
 		const colon = host.lastIndexOf(":");
-		if (colon > -1 && /^\d+$/.test(host.slice(colon + 1))) host = host.slice(0, colon);
+		if (colon > -1 && /^\d+$/.test(host.slice(colon + 1))) { entryPort = host.slice(colon + 1); host = host.slice(0, colon); }
 	}
+	if (entryPort !== undefined && entryPort !== port) return false;
 	host = host.toLowerCase().replace(/^\[|\]$/g, "");
 	if (!host) return false;
 	return hostname === host || hostname.endsWith(host.startsWith(".") ? host : `.${host}`);
@@ -305,9 +316,10 @@ function noProxyEntryMatches(hostname: string, entry: string): boolean {
 /** True when a URL must NOT be sent through the active proxy. */
 export function isProxyBypassedUrl(url: URL): boolean {
 	const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-	if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname === "127.0.0.1" || hostname === "::1") return true;
+	if (isLoopbackHostname(hostname) || hostname.endsWith(".localhost")) return true;
 	const noProxy = process.env.NO_PROXY || process.env.no_proxy;
-	if (noProxy && noProxy.split(",").some((entry) => noProxyEntryMatches(hostname, entry.trim()))) return true;
+	const port = url.port || (url.protocol === "https:" ? "443" : "80");
+	if (noProxy && noProxy.split(",").some((entry) => noProxyEntryMatches(hostname, port, entry.trim()))) return true;
 	return false;
 }
 
@@ -319,14 +331,15 @@ export interface ProxiedRequestInit extends RequestInit {
 interface ProxiedFetch {
 	(input: RequestInfo | URL, init?: ProxiedRequestInit): Promise<Response>;
 	__piWebAccessProxyFetch?: boolean;
+	__piWebAccessProxyStorage?: AsyncLocalStorage<string | null>;
 }
 
 /** Wraps globalThis.fetch so every http(s) call routes through curl while a proxy is active. Idempotent. */
 export function installGlobalProxyFetch(): void {
 	const current = globalThis.fetch as ProxiedFetch;
-	if (typeof current !== "function" || current.__piWebAccessProxyFetch === true) return;
+	if (typeof current !== "function" || (current.__piWebAccessProxyFetch === true && current.__piWebAccessProxyStorage === proxyStorage)) return;
 	const nativeFetch = current;
-	const wrapped: ProxiedFetch = ((input: RequestInfo | URL, init?: ProxiedRequestInit) => {
+	const wrapped: ProxiedFetch = (async (input: RequestInfo | URL, init?: ProxiedRequestInit) => {
 		// Prefer caller-attached __proxy (survives pLimit context loss) over AsyncLocalStorage.
 		const proxy = init?.__proxy ?? getActiveProxy();
 		if (!proxy) return nativeFetch(input, init);
@@ -339,9 +352,15 @@ export function installGlobalProxyFetch(): void {
 		if (!url || (url.protocol !== "http:" && url.protocol !== "https:") || isProxyBypassedUrl(url)) {
 			return nativeFetch(input, init);
 		}
+		if (input instanceof Request) {
+			const request = new Request(input, init);
+			const body = request.body ? await request.arrayBuffer() : undefined;
+			return fetchViaCurl(new URL(request.url), { ...init, method: request.method, headers: request.headers, signal: request.signal, redirect: request.redirect, body }, proxy);
+		}
 		return fetchViaCurl(url, init ?? {}, proxy);
 	});
 	wrapped.__piWebAccessProxyFetch = true;
+	wrapped.__piWebAccessProxyStorage = proxyStorage;
 	globalThis.fetch = wrapped;
 }
 
@@ -383,6 +402,7 @@ async function fetchViaCurl(url: URL, init: RequestInit, proxyUrl: string): Prom
 			return response;
 		}
 		if (currentInit.redirect === "manual") return response;
+		await response.body?.cancel().catch(() => {});
 		if (currentInit.redirect === "error") throw new TypeError(`Proxy fetch redirect blocked from ${current.toString()}`);
 		if (redirects === 20) throw new Error(`Too many proxy redirects from ${url.toString()}`);
 
@@ -417,12 +437,14 @@ async function fetchViaCurlOnce(url: URL, init: RequestInit, proxyUrl: string): 
 	const headerFile = join(dir, "headers");
 	const bodyFile = join(dir, "body");
 	const requestBodyFile = join(dir, "request-body");
+	const curlConfigFile = join(dir, "curl-config");
 
 	const args: string[] = [
 		"--silent",
 		"--show-error",
 		"--compressed",
 		"--connect-timeout", "20",
+		"--max-filesize", String(MAX_PROXY_RESPONSE_BYTES),
 		"-x", proxyUrl,
 		"-D", headerFile,
 		"--output", bodyFile,
@@ -430,12 +452,16 @@ async function fetchViaCurlOnce(url: URL, init: RequestInit, proxyUrl: string): 
 	];
 
 	if (method !== "GET" && method !== "HEAD") args.push("-X", method);
+	if (method === "HEAD") args.push("--head");
 
 	for (const [name, value] of headers.entries()) {
 		if (value === "") continue;
 		args.push("-H", `${name}: ${value}`);
 	}
 
+	const signal = init.signal ?? null;
+	let stdout: string;
+	try {
 	const body = init.body;
 	if (body !== undefined && body !== null) {
 		let buffer: Buffer;
@@ -444,22 +470,29 @@ async function fetchViaCurlOnce(url: URL, init: RequestInit, proxyUrl: string): 
 		else if (body instanceof ArrayBuffer) buffer = Buffer.from(body);
 		else if (ArrayBuffer.isView(body)) buffer = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
 		else throw new Error(`Unsupported request body type for proxy fetch: ${typeof body}`);
-		await writeFile(requestBodyFile, buffer);
+		await writeFile(requestBodyFile, buffer, { mode: 0o600 });
 		args.push("--data-binary", `@${requestBodyFile}`);
 		if (method === "GET") args.unshift("-X", "GET");
 	}
 
-	args.push(url.toString());
-
-	const signal = init.signal ?? null;
-	let stdout: string;
-	try {
+	// Keep proxy credentials and Authorization headers out of process argv.
+	const quoted = (value: string) => `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r")}"`;
+	const flags = new Set(["--silent", "--show-error", "--compressed", "--head"]);
+	const configLines: string[] = [];
+	const shortOptions: Record<string, string> = { "-x": "proxy", "-D": "dump-header", "-H": "header", "-X": "request" };
+	for (let i = 0; i < args.length; i++) {
+		const option = args[i]!;
+		const name = shortOptions[option] ?? option.replace(/^-+/, "");
+		configLines.push(flags.has(option) ? name : `${name} = ${quoted(args[++i]!)}`);
+	}
+	configLines.push(`url = ${quoted(url.toString())}`);
+	await writeFile(curlConfigFile, configLines.join("\n"), { mode: 0o600 });
 		stdout = await new Promise<string>((resolve, reject) => {
 			if (signal?.aborted) {
 				reject(new DOMException("The operation was aborted.", "AbortError"));
 				return;
 			}
-			const child = spawn("curl", args, { windowsHide: true });
+			const child = spawn("curl", ["--config", curlConfigFile], { windowsHide: true });
 			let out = "";
 			let stderr = "";
 			const onAbort = () => { try { child.kill(); } catch {} };
@@ -468,6 +501,7 @@ async function fetchViaCurlOnce(url: URL, init: RequestInit, proxyUrl: string): 
 			}
 			child.stdout?.on("data", (chunk: Buffer) => { out += chunk.toString("utf-8"); });
 			child.stderr?.on("data", (chunk: Buffer) => { if (stderr.length < 4096) stderr += chunk.toString("utf-8"); });
+			for (const stream of [child.stdout, child.stderr]) stream?.on("error", err => { try { child.kill(); } catch {} reject(err); });
 			child.once("error", (err: NodeJS.ErrnoException) => {
 				signal?.removeEventListener("abort", onAbort);
 				reject(new CurlTransportError(err.code === "ENOENT"
@@ -477,7 +511,7 @@ async function fetchViaCurlOnce(url: URL, init: RequestInit, proxyUrl: string): 
 			child.once("close", (code) => {
 				signal?.removeEventListener("abort", onAbort);
 				if (signal?.aborted) return reject(new DOMException("The operation was aborted.", "AbortError"));
-				if (code !== 0 && !out.trim()) {
+				if (code !== 0) {
 					return reject(new CurlTransportError(`curl exited with code ${code ?? "unknown"} via ${redactProxyUrl(proxyUrl)}${stderr.trim() ? `: ${stderr.trim()}` : ""}`));
 				}
 				resolve(out);
@@ -492,8 +526,10 @@ async function fetchViaCurlOnce(url: URL, init: RequestInit, proxyUrl: string): 
 	let bodyBuffer = Buffer.alloc(0);
 	let dump = "";
 	try {
+		if ((await stat(bodyFile)).size > MAX_PROXY_RESPONSE_BYTES) throw new Error("Proxy response exceeds the 32 MiB limit");
 		[dump, bodyBuffer] = await Promise.all([readFile(headerFile, "utf-8"), readFile(bodyFile)]);
-	} catch {
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		// HEAD or empty responses may not produce output files.
 	} finally {
 		await rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -517,7 +553,7 @@ async function fetchViaCurlOnce(url: URL, init: RequestInit, proxyUrl: string): 
 		// Older curl without %{json}; the header dump already provided the status.
 	}
 
-	const nullBody = status === 204 || status === 205 || status === 304;
+	const nullBody = method === "HEAD" || status === 204 || status === 205 || status === 304;
 	const response = new Response(nullBody ? null : new Uint8Array(bodyBuffer), {
 		status,
 		statusText: statusText || undefined,

@@ -5,10 +5,11 @@ import { Text, type Component } from "@earendil-works/pi-tui";
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { SidekickRuntime, HandoffProgress, HandoffReport } from "./sidekick-runtime.js";
-import { duration, fitTranscript, frameSidekick, markdownText, renderSidekickTranscript, sidekickWorkingHeader } from "./transcript.js";
+import { LEAD_ROLE_BOUNDARY } from "./prompts.js";
+import { duration, fitTranscript, frameSidekick, markdownText, renderSidekickTranscript, sidekickWorkingHeader, type SidekickTranscript, type TranscriptOptions } from "./transcript.js";
 
 const SidekickParams = Type.Object({
-  message: Type.String({ description: "A concrete implementation or verification brief for the sidekick" }),
+  message: Type.String({ description: "Self-contained execution brief for any task: objective, context, scope, constraints, acceptance criteria, checks, deliverables and existing authorization. Delegate investigation as well as implementation; the lead does not execute task work." }),
   block: Type.Optional(Type.Boolean({ description: "Wait for completion (default true)" })),
 });
 const ReadSubagentParams = Type.Object({
@@ -25,6 +26,11 @@ export interface FusionToolDeps {
   onHandoffStart?: (ctx: ExtensionContext) => void;
   onAttach?: (ctx: ExtensionContext) => void;
   onDetach?: (ctx: ExtensionContext) => void;
+}
+
+export interface FusionControls {
+  /** Use the same handoff, waiter ownership and completion delivery as model tools. */
+  sendToSidekick(ctx: ExtensionContext, message: string): string;
 }
 
 type CompletionOutcome = { report: HandoffReport } | { error: string };
@@ -114,8 +120,7 @@ function firstLine(value: string): string {
   return value.split("\n", 1)[0] ?? "";
 }
 
-function progressText(runtime: SidekickRuntime, id: string): string {
-  const progress = runtime.progress(id);
+function progressText(runtime: SidekickRuntime, id: string, progress = runtime.progress(id)): string {
   if (!progress) return "No active handoff progress.";
   const elapsed = duration(Date.now() - progress.startedAt);
   const recent = progress.recentTools ?? [];
@@ -124,9 +129,9 @@ function progressText(runtime: SidekickRuntime, id: string): string {
   return `◆ sidekick working · ${String(progress.toolCalls)} tool calls · ${elapsed}${tools}${tail}`;
 }
 
-function progressKey(runtime: SidekickRuntime, id: string): string {
-  const progress = runtime.progress(id);
+function progressKey(progress: HandoffProgress | undefined): string {
   if (!progress) return "";
+  if (progress.revision !== undefined) return String(progress.revision);
   const events = progress.events ?? [];
   const last = events.at(-1);
   return `${String(progress.toolCalls)}|${(progress.recentTools ?? []).join("|")}|${progress.textTail ?? ""}|${String(events.length)}|${last?.kind === "tool" ? `${String(last.output?.length ?? 0)}|${String(last.done)}` : last?.kind === "text" ? `${String(last.text?.length ?? 0)}|${String(last.open)}` : ""}`;
@@ -223,10 +228,11 @@ async function waitForReport(
       const tick = (): void => {
         if (finished || interrupted()) return;
         try {
-          const key = progressKey(runtime, id);
+          const progress = runtime.progress(id);
+          const key = progressKey(progress);
           if (key !== lastProgressKey) {
             lastProgressKey = key;
-            update?.({ content: [{ type: "text", text: modelText(progressText(runtime, id)) }], details: { progress: runtime.progress(id) } });
+            update?.({ content: [{ type: "text", text: modelText(progressText(runtime, id, progress)) }], details: { progress } });
           }
         } catch (error) {
           update = undefined;
@@ -296,13 +302,25 @@ function backgroundComponent(theme: ThemeLike): Component {
 }
 
 type ToolDetails = Partial<HandoffReport> & { progress?: HandoffProgress; background?: boolean };
+type RenderContext = { state: Record<string, unknown> };
+type TranscriptState = { theme: ThemeLike; status: "working" | "completed" | "error"; transcript: SidekickTranscript; framed: Component };
+
+function persistentTranscript(theme: ThemeLike, status: TranscriptState["status"], opts: TranscriptOptions, context?: RenderContext): Component {
+  let state = context?.state.fusionTranscript as TranscriptState | undefined;
+  if (!state || state.theme !== theme || state.status !== status) {
+    const transcript = renderSidekickTranscript(theme, opts);
+    state = { theme, status, transcript, framed: frameTranscript(theme, status, transcript) };
+    if (context) context.state.fusionTranscript = state;
+  } else state.transcript.update(opts);
+  return state.framed;
+}
 function reportHeader(theme: ThemeLike, label: string, report: Partial<HandoffReport> | undefined): string {
   const status = report?.status ?? "done";
   const metrics = report ? `· ${String(report.toolCalls ?? 0)} tool calls · ${duration(report.durationMs ?? 0)}${report.usage ? ` · in ${String(report.usage.input ?? 0)} / out ${String(report.usage.output ?? 0)} tokens` : ""}` : "";
   return `${theme.fg(status === "completed" ? "success" : "error", "◆")} ${theme.fg("accent", theme.bold(`${label} ${status}`))} ${theme.fg("dim", metrics)}`;
 }
 
-function renderToolTranscript(toolResult: { content?: unknown; details?: unknown }, options: { expanded?: boolean }, theme: ThemeLike, label: "sidekick" | "read_subagent"): Component {
+function renderToolTranscript(toolResult: { content?: unknown; details?: unknown }, options: { expanded?: boolean }, theme: ThemeLike, label: "sidekick" | "read_subagent", context?: RenderContext): Component {
   const details = typeof toolResult.details === "object" && toolResult.details !== null ? toolResult.details as ToolDetails : undefined;
   if (details?.background === true) return backgroundComponent(theme);
   const hasProgress = details !== undefined && "progress" in details;
@@ -311,7 +329,7 @@ function renderToolTranscript(toolResult: { content?: unknown; details?: unknown
   const report = progress ? undefined : details;
   if (!progress && typeof report?.text !== "string") return fitTranscript(new Text(displayText(contentText(toolResult.content)), 0, 0));
   const events = progress?.events ?? report?.events;
-  return frameTranscript(theme, transcriptStatus(Boolean(progress), report), renderSidekickTranscript(theme, {
+  return persistentTranscript(theme, transcriptStatus(Boolean(progress), report), {
     events: Array.isArray(events) ? events : [],
     droppedEvents: progress?.droppedEvents,
     header: progress ? sidekickWorkingHeader(theme, progress, label) : reportHeader(theme, label, report),
@@ -319,7 +337,7 @@ function renderToolTranscript(toolResult: { content?: unknown; details?: unknown
     isPartial: Boolean(progress),
     report: typeof report?.text === "string" ? { text: displayText(report.text) } : undefined,
     renderText: (text) => markdownText(displayText(text)),
-  }));
+  }, context);
 }
 
 function renderCompletionCard(theme: ThemeLike, report: Partial<HandoffReport> | undefined, expanded: boolean): Component {
@@ -334,7 +352,7 @@ function renderCompletionCard(theme: ThemeLike, report: Partial<HandoffReport> |
   }));
 }
 
-export function registerFusionTools(pi: ExtensionAPI, deps: FusionToolDeps): void {
+export function registerFusionTools(pi: ExtensionAPI, deps: FusionToolDeps): FusionControls {
   pi.registerMessageRenderer("sidekick-completion", (message: { details?: HandoffReport }, options, theme) => renderCompletionCard(theme as unknown as ThemeLike, message.details, options.expanded));
   pi.registerMessageRenderer("sidekick-diagnostic", (message) => fitTranscript(new Text(displayText(contentText(message.content)), 0, 0)));
   const diagnostic = (ctx: ExtensionContext | undefined, message: string): void => {
@@ -399,7 +417,7 @@ export function registerFusionTools(pi: ExtensionAPI, deps: FusionToolDeps): voi
         publish(ctx, waited.report);
         if (!current(waited.report)) throw new Error("Sidekick report belongs to an inactive session or branch; it was not returned.");
         if (signal?.aborted) throw new Error(`Handoff ${id} aborted.`);
-        if (ctx.hasPendingMessages?.()) return result("A user message arrived. Act on it before collecting the sidekick report.");
+        if (ctx.hasPendingMessages?.()) return result("A user message arrived. Update the plan and sidekick brief before collecting the report; remain the coordinator and delegate any new task work.");
         completion.consume(id);
         consumed = true;
         return output;
@@ -407,29 +425,39 @@ export function registerFusionTools(pi: ExtensionAPI, deps: FusionToolDeps): voi
       if (waited.error) { completion.consume(id); throw new Error(`Handoff ${id} failed: ${waited.error}`); }
       if (waited.aborted || signal?.aborted) throw new Error(`Handoff ${id} aborted.`);
       const progress = progressText(runtime, id);
-      if (waited.interrupted || ctx.hasPendingMessages?.()) return result(`A user message arrived while the sidekick (agent_id ${id}) was working. The handoff continues in the background. Act on the user's message first, then call read_subagent({agent_id:"${id}", block:true}) to collect the report or sidekick({message}) to redirect it.\n${waited.interrupted ?? progress}`, { progress: runtime.progress(id), id });
+      if (waited.interrupted || ctx.hasPendingMessages?.()) return result(`A user message arrived while the sidekick (agent_id ${id}) was working. The handoff continues in the background. Update the plan and brief as needed, then call read_subagent({agent_id:"${id}", block:true}) to collect the report or sidekick({message}) to redirect it. Remain the coordinator; delegate all new task work.\n${waited.interrupted ?? progress}`, { progress: runtime.progress(id), id });
       return result(`Handoff ${id} is still running.\n${progress}`, { progress: runtime.progress(id), id });
     } finally {
       completion.detach(id, done, token);
       if (!consumed) safeCallback(ctx, "Sidekick detach status", () => deps.onDetach?.(ctx));
     }
   };
-  const reportLimits = " Output cap: 32 KiB; fullTextPath contains truncated reports. Token counts describe sidekick usage.";
+  const reportLimits = " Output cap: 32 KiB; fullTextPath contains truncated reports. Ask the sidekick for missing report sections or evidence instead of reading files or running checks yourself. Token counts describe sidekick usage.";
+  const begin = (ctx: ExtensionContext, message: string) => {
+    const runtime = deps.getRuntime(ctx);
+    if (!runtime) throw new Error("Fusion is not active — pick a Fusion pair with /unipi:model.");
+    const wasBusy = runtime.isBusy();
+    const handoff = runtime.handoff(message);
+    origins.set(handoff.id, { runtime, ctx });
+    if (!wasBusy) safeCallback(ctx, "Sidekick start status", () => deps.onHandoffStart?.(ctx));
+    return { runtime, handoff };
+  };
 
   pi.registerTool({
     name: "sidekick",
     label: "Sidekick",
-    description: "Send a brief to the persistent sidekick sharing this filesystem. block:true (default) waits; block:false delivers completion automatically. Calls during a handoff steer it. Cancelling a blocking wait requests abort." + reportLimits,
+    description: "Delegate all task execution to the persistent sidekick sharing this filesystem, including research, simple questions, writing, implementation, verification and authorized external actions. The lead only plans, assigns and accepts results. block:true (default) waits; block:false delivers completion automatically. Calls during a handoff steer it, not a second worker. Cancelling a blocking wait requests abort." + reportLimits,
+    promptSnippet: "Delegate every substantive task to sidekick; the Fusion lead only plans, assigns, reviews and accepts results.",
+    promptGuidelines: [
+      LEAD_ROLE_BOUNDARY,
+      "Give a self-contained brief with acceptance criteria and existing authorization. Delegate even tiny tasks and investigation you could do yourself.",
+      "Sidekick failure, delay or missing evidence requires another brief, clarification or a blocker report; never take over execution.",
+    ],
     parameters: SidekickParams,
     renderCall: (args, theme) => fitTranscript(new Text(`${theme.fg("toolTitle", theme.bold("◆ sidekick"))} ${theme.fg("dim", firstLine(String(args.message)).slice(0, 100))}`, 0, 0)),
-    renderResult: (toolResult, options, theme) => renderToolTranscript(toolResult, options, theme as unknown as ThemeLike, "sidekick"),
+    renderResult: (toolResult, options, theme, context) => renderToolTranscript(toolResult, options, theme as unknown as ThemeLike, "sidekick", context),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const runtime = deps.getRuntime(ctx);
-      if (!runtime) throw new Error("Fusion is not active — pick a Fusion pair with /unipi:model.");
-      const wasBusy = runtime.isBusy();
-      const handoff = runtime.handoff(params.message);
-      origins.set(handoff.id, { runtime, ctx });
-      if (!wasBusy) safeCallback(ctx, "Sidekick start status", () => deps.onHandoffStart?.(ctx));
+      const { runtime, handoff } = begin(ctx, params.message);
       if (params.block === false) {
         completion.detach(handoff.id, handoff.done);
         safeCallback(ctx, "Sidekick detach status", () => deps.onDetach?.(ctx));
@@ -442,10 +470,15 @@ export function registerFusionTools(pi: ExtensionAPI, deps: FusionToolDeps): voi
   pi.registerTool({
     name: "read_subagent",
     label: "Read Sidekick",
-    description: "Read a sidekick handoff report by agent_id (omit for the latest). block:true waits for completion (default timeout 2700s when omitted); block:false or omitted returns the current progress snapshot immediately." + reportLimits,
+    description: "Collect sidekick reports and execution evidence for lead review and acceptance, not for taking over the work. agent_id selects a handoff (omit for the latest). block:true waits for completion (default timeout 2700s when omitted); block:false or omitted returns the current progress snapshot immediately." + reportLimits,
+    promptSnippet: "Collect sidekick evidence for acceptance; send corrections or missing checks back to sidekick.",
+    promptGuidelines: [
+      "Review the report against acceptance criteria; completed status alone is not proof. Request missing evidence, corrections and verification from sidekick.",
+      "Use block:true when waiting for a result instead of repeated polling. While waiting, do coordination work only.",
+    ],
     parameters: ReadSubagentParams,
     renderCall: (args, theme) => fitTranscript(new Text(`${theme.fg("toolTitle", theme.bold("◆ read_subagent"))} ${theme.fg("dim", args.block === true ? "· waiting" : "· snapshot")}`, 0, 0)),
-    renderResult: (toolResult, options, theme) => renderToolTranscript(toolResult, options, theme as unknown as ThemeLike, "read_subagent"),
+    renderResult: (toolResult, options, theme, context) => renderToolTranscript(toolResult, options, theme as unknown as ThemeLike, "read_subagent", context),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const runtime = deps.getRuntime(ctx);
       if (!runtime) throw new Error("Fusion is not active — pick a Fusion pair with /unipi:model.");
@@ -455,12 +488,12 @@ export function registerFusionTools(pi: ExtensionAPI, deps: FusionToolDeps): voi
       const selected = runtime.reports.get(id);
       if (selected) {
         if (signal?.aborted) throw new Error(`Handoff ${id} aborted.`);
-        if (ctx.hasPendingMessages?.()) return result("A user message arrived. Act on it before collecting the sidekick report.");
+        if (ctx.hasPendingMessages?.()) return result("A user message arrived. Update the plan and sidekick brief before collecting the report; remain the coordinator and delegate any new task work.");
         const output = reportResult("read_subagent", selected);
         publish(ctx, selected);
         if (!current(selected)) throw new Error("Sidekick report belongs to an inactive session or branch; it was not returned.");
         if (signal?.aborted) throw new Error(`Handoff ${id} aborted.`);
-        if (ctx.hasPendingMessages?.()) return result("A user message arrived. Act on it before collecting the sidekick report.");
+        if (ctx.hasPendingMessages?.()) return result("A user message arrived. Update the plan and sidekick brief before collecting the report; remain the coordinator and delegate any new task work.");
         completion.consume(id);
         return output;
       }
@@ -474,6 +507,16 @@ export function registerFusionTools(pi: ExtensionAPI, deps: FusionToolDeps): voi
       return collect("read_subagent", runtime, id, latest.done, signal, onUpdate, ctx, (params.timeout ?? 2700) * 1000);
     },
   });
+  return {
+    sendToSidekick(ctx, message) {
+      const text = message.trim();
+      if (!text) throw new Error("Sidekick message cannot be empty.");
+      const { handoff } = begin(ctx, text);
+      completion.detach(handoff.id, handoff.done);
+      safeCallback(ctx, "Sidekick detach status", () => deps.onDetach?.(ctx));
+      return handoff.id;
+    },
+  };
 }
 
 export { reportText, progressText };

@@ -1,5 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { Editor, OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import { type Editor, type OverlayHandle, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import { COLLAPSE_KEY_OFF, formatKeySpecForDisplay } from "../config.js";
 import type { QuestionData, QuestionnaireResult, QuestionParams } from "../tool/types.js";
 import type { WrappingSelectItem } from "../view/components/wrapping-select.js";
@@ -75,6 +75,7 @@ export class QuestionnaireSession {
 	private readonly collapseKey: string;
 	private readonly canReopenWhileHidden: boolean;
 	private inputEditorOpen = false;
+	private finished = false;
 
 	/**
 	 * Overlay handle captured by `ctx.ui.custom`'s `onHandle` callback. Lets the session
@@ -144,11 +145,11 @@ export class QuestionnaireSession {
 			this.collapseKey === COLLAPSE_KEY_OFF
 				? t("hint.cancel", HINT_PART_CANCEL)
 				: t("hint.expand_line", COLLAPSED_HINT_TEMPLATE).replace(KEY_PLACEHOLDER, collapseKeyDisplay);
-		return (_width: number): string[] => [theme.fg("dim", ` ${collapsedHintLine()} `)];
+		return (width: number): string[] => [truncateToWidth(theme.fg("dim", ` ${collapsedHintLine()} `), Math.max(1, width), "")];
 	}
 
 	dispatch(data: string): void {
-		if (this.inputEditorOpen) return;
+		if (this.finished || this.inputEditorOpen) return;
 		const action = routeKey(data, this.state, this.runtime());
 		if (action.kind === "ignore") {
 			this.handleIgnoreInline(data);
@@ -158,6 +159,7 @@ export class QuestionnaireSession {
 	}
 
 	private commit(action: QuestionnaireAction): void {
+		if (this.finished) return;
 		const result = reduce(this.state, action, this.applyContext());
 		this.state = result.state;
 		for (const effect of result.effects) this.runEffect(effect);
@@ -201,6 +203,7 @@ export class QuestionnaireSession {
 				if (this.canReopenWhileHidden) this.overlayHandle?.setHidden(effect.hidden);
 				return;
 			case "done":
+				this.finished = true;
 				this.done(effect.result);
 				return;
 		}
@@ -213,7 +216,7 @@ export class QuestionnaireSession {
 		void this.editInput(value).then(
 			(edited) => {
 				this.inputEditorOpen = false;
-				if (edited !== undefined) this.commit({ kind: "input_replace", value: edited });
+				if (!this.finished && edited !== undefined) this.commit({ kind: "input_replace", value: edited });
 			},
 			() => {
 				// The host callback reports launch errors; retain the draft and restore input handling.
@@ -280,6 +283,12 @@ export class QuestionnaireSession {
 	 * happens via the `set_overlay_hidden` effect like every other side effect.
 	 */
 	toggleCollapsedExternal(): void {
-		if (!this.inputEditorOpen) this.commit({ kind: "toggle_collapsed" });
+		if (!this.finished && !this.inputEditorOpen) this.commit({ kind: "toggle_collapsed" });
+	}
+
+	cancel(): void {
+		if (this.finished) return;
+		this.finished = true;
+		this.done({ answers: [...this.state.answers.values()], cancelled: true });
 	}
 }

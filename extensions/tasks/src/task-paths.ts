@@ -10,12 +10,18 @@
  * in moves nothing and opting back out strands nothing.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, rmdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { TasksConfig } from "./tasks-config.js";
 
 type TaskScope = NonNullable<TasksConfig["taskScope"]>;
+
+function safeSessionId(sessionId: string): string {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(sessionId)
+    ? sessionId : `id-${createHash("sha256").update(sessionId).digest("hex")}`;
+}
 
 /**
  * Directory name standing for one workspace.
@@ -37,7 +43,7 @@ export function globalSessionTasksDir(cwd: string): string {
 
 /** The in-workspace location, unchanged since session scope was introduced. */
 export function workspaceSessionTaskFile(cwd: string, sessionId: string): string {
-  return join(cwd, ".pi", "tasks", `tasks-${sessionId}.json`);
+  return join(cwd, ".pi", "tasks", `tasks-${safeSessionId(sessionId)}.json`);
 }
 
 /**
@@ -50,7 +56,7 @@ export function workspaceSessionTaskFile(cwd: string, sessionId: string): string
 export function sessionTaskFile(cwd: string, sessionId: string, scope: TaskScope): string {
   const inWorkspace = workspaceSessionTaskFile(cwd, sessionId);
   if (scope !== "session-global") return inWorkspace;
-  return existsSync(inWorkspace) ? inWorkspace : join(globalSessionTasksDir(cwd), `tasks-${sessionId}.json`);
+  return existsSync(inWorkspace) ? inWorkspace : join(globalSessionTasksDir(cwd), `tasks-${safeSessionId(sessionId)}.json`);
 }
 
 /**

@@ -15,7 +15,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { ASK_USER_QUESTION_TOOL_NAME } from "./ask-user-question.js";
+import { ASK_USER_QUESTION_TOOL_NAME, canAskUser } from "./ask-user-question.js";
 
 /**
  * Strip-or-restore `ask_user_question` to match `ctx.hasUI`. Reads the active
@@ -25,15 +25,16 @@ import { ASK_USER_QUESTION_TOOL_NAME } from "./ask-user-question.js";
 export function reconcileAskUserQuestionTool(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	const active = pi.getActiveTools();
 	const hasTool = active.includes(ASK_USER_QUESTION_TOOL_NAME);
+	const usable = canAskUser(ctx);
 	// !hasUI → strip so the tool never reaches the LLM's tool list in
 	// non-interactive runs; hasUI → restore. The in-handler guards in
 	// ask-user-question.ts (!hasUI, and the custom()-undefined → dialog-walker /
 	// no_custom_ui backstop) remain as one-turn backstops if a future Pi change
 	// reorders the tool-list snapshot ahead of before_agent_start, or a host
 	// reports hasUI without any usable rendering primitive.
-	if (!ctx.hasUI && hasTool) {
+	if (!usable && hasTool) {
 		pi.setActiveTools(active.filter((n) => n !== ASK_USER_QUESTION_TOOL_NAME));
-	} else if (ctx.hasUI && !hasTool) {
+	} else if (usable && !hasTool) {
 		pi.setActiveTools([...active, ASK_USER_QUESTION_TOOL_NAME]);
 	}
 }
@@ -43,5 +44,13 @@ export function reconcileAskUserQuestionTool(pi: ExtensionAPI, ctx: ExtensionCon
  * before each turn's tool-list snapshot is read. Safe to call once at load.
  */
 export function registerAskUserQuestionReconciler(pi: ExtensionAPI): void {
-	pi.on("before_agent_start", (_event, ctx) => reconcileAskUserQuestionTool(pi, ctx));
+	pi.on("before_agent_start", (event, ctx) => {
+		const hadTool = pi.getActiveTools().includes(ASK_USER_QUESTION_TOOL_NAME);
+		reconcileAskUserQuestionTool(pi, ctx);
+		if (!event.systemPromptOptions) return;
+		const active = pi.getActiveTools().includes(ASK_USER_QUESTION_TOOL_NAME);
+		const selected = event.systemPromptOptions.selectedTools;
+		if (!active) event.systemPromptOptions.selectedTools = selected.filter(name => name !== ASK_USER_QUESTION_TOOL_NAME);
+		else if (!hadTool && !selected.includes(ASK_USER_QUESTION_TOOL_NAME)) event.systemPromptOptions.selectedTools = [...selected, ASK_USER_QUESTION_TOOL_NAME];
+	});
 }

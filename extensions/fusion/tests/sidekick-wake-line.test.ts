@@ -135,7 +135,7 @@ test("renders the live tool count and elapsed time, and collapses without progre
   const widget = wakeCalls()[0]?.widget;
   const rendered = renderWidget(widget);
   assert.equal(rendered.length, 1);
-  assert.match(rendered[0] ?? "", /sidekick working · 2 tool calls · 5\.\ds — resumes automatically when done$/);
+  assert.match(rendered[0] ?? "", /sidekick working · 2 tool calls · 5\.\ds — \/unipi:sidekick view \/ message · resumes automatically when done$/);
 
   progress = undefined;
   assert.deepEqual(renderWidget(widget), [], "no progress collapses the line without disposing the widget");

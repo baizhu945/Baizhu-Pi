@@ -92,3 +92,5 @@ No native dependencies, no compiler, no API keys — the extension makes no mode
 ## License
 
 MIT — see [LICENSE](https://github.com/juicesharp/rpiv-mono/blob/main/packages/rpiv-ask-user-question/LICENSE).
+
+Local audit revision 2.12.0-local.1 honors cancellation and session changes, closes only its own overlay, bounds collapsed rows, ignores late editor results, validates exact RPC selections, sanitizes terminal controls, and balances concurrent blocked events. Fusion private RPC children cannot display human questions and no longer fabricate a decline when their transport cancels UI requests. The active tool and prompt snapshot are reconciled together.

@@ -1,5 +1,6 @@
 import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, type Stats, unlinkSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ExtractedContent } from "./extract.ts";
@@ -68,6 +69,17 @@ export interface StoredSearchData {
 }
 
 const storedResults = new Map<string, StoredSearchData>();
+let sessionGeneration = 0;
+const resultSession = new AsyncLocalStorage<number>();
+
+export function withResultSession<T>(operation: () => T): T {
+	return resultSession.run(sessionGeneration, operation);
+}
+
+function assertResultSession(): void {
+	const generation = resultSession.getStore();
+	if (generation !== undefined && generation !== sessionGeneration) throw new Error("Web result belongs to an inactive session or branch");
+}
 
 export function generateId(): string {
 	return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -413,10 +425,12 @@ export function pruneExpiredFetchCache(now = Date.now(), requestedLimits?: Parti
 }
 
 export function storeResult(id: string, data: StoredSearchData): void {
+	assertResultSession();
 	storedResults.set(id, data);
 }
 
 export function storeFetchedContentResult(id: string, data: StoredSearchData & { type: "fetch"; urls: ExtractedContent[] }): StoredSearchData {
+	assertResultSession();
 	pruneExpiredFetchedResults(Date.now());
 	let ref: FetchCacheRef | null = null;
 	let cacheError: string | undefined;
@@ -425,15 +439,19 @@ export function storeFetchedContentResult(id: string, data: StoredSearchData & {
 	} catch (err) {
 		cacheError = `Failed to write fetched content cache: ${err instanceof Error ? err.message : String(err)}`;
 	}
-	storedResults.set(id, ref ? { ...data, fetchCache: ref, urlMetadata: metadataForUrls(data.urls) } : { ...data, fetchCacheError: cacheError });
+	// A successful disk cache owns the body. Keeping another full copy here
+	// made the 128 MiB disk limit ineffective against unbounded process memory.
+	storedResults.set(id, ref ? createFetchSessionData(data, ref) : { ...data, fetchCacheError: cacheError });
 	return createFetchSessionData(data, ref, cacheError);
 }
 
 export function getResult(id: string): StoredSearchData | null {
+	assertResultSession();
 	const data = storedResults.get(id);
 	if (!data) return null;
 	const loaded = readCachedFetchData(data);
-	if (loaded !== data) storedResults.set(id, loaded);
+	// Do not promote disk-backed pages into permanent, unbounded RAM entries.
+	if (loaded !== data && !data.fetchCache) storedResults.set(id, loaded);
 	return loaded;
 }
 
@@ -459,6 +477,7 @@ export function deleteResult(id: string): boolean {
 }
 
 export function clearResults(): void {
+	sessionGeneration++;
 	storedResults.clear();
 }
 
@@ -479,7 +498,7 @@ function isValidStoredData(data: unknown): data is StoredSearchData {
 }
 
 export function restoreFromSession(ctx: ExtensionContext): void {
-	storedResults.clear();
+	clearResults();
 	const now = Date.now();
 	pruneExpiredFetchCache(now);
 

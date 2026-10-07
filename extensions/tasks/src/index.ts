@@ -30,6 +30,7 @@ import { loadGlobalTasksConfig, loadTasksConfig } from "./tasks-config.js";
 import type { Task } from "./types.js";
 import { openSettingsMenu } from "./ui/settings-menu.js";
 import { TaskWidget, type UICtx } from "./ui/task-widget.js";
+import { wireWidgetCollapse } from "./ui/widget-collapse.js";
 
 // ---- Helpers ----
 
@@ -152,6 +153,7 @@ export default function (pi: ExtensionAPI) {
   let storeTarget = resolveStoreTarget();
   let store = new TaskStore(storeTarget.path);
   const widget = new TaskWidget(store, cfg);
+  const disposeCollapse = wireWidgetCollapse(pi, collapsed => widget.setCollapsed(collapsed));
 
   const autoClear = new AutoClearManager(() => store, () => cfg.autoClearCompleted ?? "on_list_complete", AUTO_CLEAR_DELAY);
 
@@ -207,7 +209,7 @@ export default function (pi: ExtensionAPI) {
     persistedTasksShown = true;
     const tasks = store.list();
     if (tasks.length > 0) {
-      if (!isResume && tasks.every(t => t.status === "completed")) {
+      if (!isResume && cfg.autoClearCompleted !== "never" && tasks.every(t => t.status === "completed")) {
         store.clearCompleted();
         if (isSessionScope()) deleteSessionFileIfEmpty();
       } else {
@@ -242,7 +244,7 @@ export default function (pi: ExtensionAPI) {
     autoClear.onRunEnded();
   });
 
-  pi.on("session_shutdown", async () => { widget.dispose(); });
+  pi.on("session_shutdown", async () => { disposeCollapse(); widget.dispose(); });
 
   // ── Token usage tracking + stale-task detection ──
   // Feed per-turn token counts from assistant messages into the widget.
@@ -337,9 +339,11 @@ export default function (pi: ExtensionAPI) {
       persistedTasksShown = false;
       resetCadenceState(cadence);
       autoClear.reset();
-      // Memory mode has no file to switch — clear tasks explicitly on /new.
-      if (reason === "new" && taskScope === "memory") {
-        store.clearAll();
+      // All non-persisted stores are session-local, including PI_TASKS=off and
+      // --no-session. A fork is seeded below into an independent new store.
+      if (!storeTarget.path) {
+        store = new TaskStore();
+        widget.setStore(store);
       }
     }
 

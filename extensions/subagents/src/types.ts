@@ -173,6 +173,8 @@ export interface AgentRecord {
   status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error";
   result?: string;
   error?: string;
+  /** The model turn succeeded; worktree verification/cleanup may still be in flight. */
+  executionSucceeded?: boolean;
   toolUses: number;
   startedAt: number;
   completedAt?: number;
@@ -206,7 +208,7 @@ export interface AgentRecord {
   /** Worktree info if the agent is running in an isolated worktree. */
   worktree?: { path: string; branch: string; baseSha: string; workPath: string };
   /** Worktree cleanup result after agent completion. */
-  worktreeResult?: { hasChanges: boolean; branch?: string };
+  worktreeResult?: { hasChanges: boolean; branch?: string; path?: string; error?: string };
   /** The tool_use_id from the original Agent tool call. */
   toolCallId?: string;
   /** Path to the streaming output transcript file. */

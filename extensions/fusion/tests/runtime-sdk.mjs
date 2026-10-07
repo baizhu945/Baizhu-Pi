@@ -1,5 +1,5 @@
-// Native SDK/preflight/queued-user events; no Fusion tools, subprocesses,
-// credential files, persistent sessions, network, or actual model providers.
+// Native SDK/preflight/queued-user events and inspector controls. Local model
+// streams only: no real subprocesses, credentials, network or provider calls.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
@@ -12,7 +12,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const packageDir = process.argv[2];
 assert(packageDir, 'Expected host Pi package directory');
 const root = mkdtempSync('/tmp/fusion-runtime-sdk-');
-process.env.HOME = root;
 process.env.PI_CODING_AGENT_DIR = path.join(root, 'agent');
 process.env.PI_OFFLINE = '1';
 process.chdir(root);
@@ -20,8 +19,14 @@ const sdk = await import(pathToFileURL(path.join(packageDir, 'dist/index.js')));
 const { AssistantMessageEventStream } = await import(pathToFileURL(path.join(packageDir, 'node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js')));
 const require = createRequire(path.join(packageDir, 'package.json'));
 const { createJiti } = await import(pathToFileURL(require.resolve('jiti')));
-const jiti = createJiti(import.meta.url, { moduleCache: false });
+const jiti = createJiti(import.meta.url, { moduleCache: false, alias: {
+  '@earendil-works/pi-coding-agent': path.join(packageDir, 'dist/index.js'),
+  '@earendil-works/pi-tui': path.join(packageDir, 'node_modules/@earendil-works/pi-tui/dist/index.js'),
+  typebox: require.resolve('typebox'),
+} });
 const { SidekickRuntime } = await jiti.import(path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/sidekick-runtime.ts'));
+const { SidekickViewer, readSidekickHistory } = await jiti.import(path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/sidekick-viewer.ts'));
+const { registerFusionTools } = await jiti.import(path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/tools.ts'));
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 function removeTree(directory) {
   for (const entry of readdirSync(directory)) {
@@ -32,7 +37,7 @@ function removeTree(directory) {
   rmdirSync(directory);
 }
 
-async function setup(t) {
+async function setup(t, persistent = false) {
   const settings = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
   const loader = new sdk.DefaultResourceLoader({
     cwd: root, agentDir: process.env.PI_CODING_AGENT_DIR, settingsManager: settings,
@@ -49,8 +54,9 @@ async function setup(t) {
   });
   await loader.reload();
   assert.deepEqual(loader.getExtensions().errors, []);
+  const manager = persistent ? sdk.SessionManager.create(root, path.join(root, 'sessions')) : sdk.SessionManager.inMemory(root);
   const { session } = await sdk.createAgentSession({ cwd: root, agentDir: process.env.PI_CODING_AGENT_DIR,
-    settingsManager: settings, resourceLoader: loader, sessionManager: sdk.SessionManager.inMemory(root), noTools: 'all' });
+    settingsManager: settings, resourceLoader: loader, sessionManager: manager, noTools: 'all' });
   await session.bindExtensions({ mode: 'sdk', onError: error => { throw error; } });
   await session.setModel(session._modelRuntime.getModel('runtime-fixture', 'model'));
   const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, signalCode: null, killed: false });
@@ -59,7 +65,7 @@ async function setup(t) {
   const requests = [];
   const errors = [];
   const wire = value => child.stdout.write(JSON.stringify(value) + '\n');
-  const runtime = new SidekickRuntime({ cwd: root, model: 'runtime-fixture/model', thinking: 'off', sessionFile: path.join(root, 'stub.jsonl'),
+  const runtime = new SidekickRuntime({ cwd: root, model: 'runtime-fixture/model', thinking: 'off', sessionFile: manager.getSessionFile() ?? path.join(root, 'stub.jsonl'),
     systemPrompt: 'stub', command: { command: 'memory-only', args: [] }, spawn: () => child, promptTimeoutMs: 30, reportTimeoutMs: 1000 });
   const unsubscribe = session.subscribe(event => { events.push(event); wire(event); });
   child.stdin.on('data', data => {
@@ -79,6 +85,8 @@ async function setup(t) {
           data: { isStreaming: session.isStreaming, isCompacting: session.isCompacting, pendingMessageCount: session.pendingMessageCount } });
       } else if (command.type === 'get_last_assistant_text') {
         wire({ type: 'response', id: command.id, command: command.type, success: true, data: { text: session.getLastAssistantText() } });
+      } else if (command.type === 'abort') {
+        void session.abort().then(() => wire({ type: 'response', id: command.id, command: 'abort', success: true }));
       }
     }
   });
@@ -93,6 +101,63 @@ function finishStream(stream, model, text) {
 }
 
 try {
+  for (const blocking of [false, true]) {
+    await test(`native inspector steers the existing child and returns one result (blocking=${blocking})`, { timeout: 5000 }, async t => {
+      const h = await setup(t, true);
+      const tools = new Map();
+      const sent = [];
+      const ctx = { hasUI: false, hasPendingMessages: () => false };
+      const controls = registerFusionTools({ on() {}, registerMessageRenderer() {}, registerTool(tool) { tools.set(tool.name, tool); },
+        sendMessage(message, options) { sent.push({ message, options }); } }, { getRuntime: () => h.runtime });
+      let release, started;
+      const start = new Promise(resolve => { started = resolve; });
+      let calls = 0;
+      const contexts = [];
+      h.session.agent.streamFunction = (model, context) => {
+        contexts.push(context);
+        const stream = new AssistantMessageEventStream();
+        calls++;
+        if (calls === 1) { release = () => finishStream(stream, model, 'initial answer'); started(); }
+        else queueMicrotask(() => finishStream(stream, model, 'human direction fulfilled'));
+        return stream;
+      };
+      const run = tools.get('sidekick').execute('call', { message: 'original brief', block: blocking }, undefined, undefined, ctx);
+      await start;
+      const id = h.runtime.latest().id;
+      const viewer = new SidekickViewer({ runtime: h.runtime, name: 'fixture sidekick', thinking: 'off',
+        tui: { terminal: { rows: 40 }, requestRender() {} }, theme: { fg: (_c, text) => text, bold: text => text }, done() {},
+        onSend: message => controls.sendToSidekick(ctx, message), onStop: () => h.runtime.abort() });
+      try {
+        assert.match(viewer.render(100).join('\n'), /original brief/);
+        for (const input of ['\r', 'human direction', '\r']) viewer.handleInput(input);
+        assert.equal(h.runtime.latest().id, id);
+        assert.equal(h.requests.at(-1).streamingBehavior, 'steer');
+        release();
+        const result = await run;
+        const report = await h.runtime.latest().done;
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(report.status, 'completed');
+        assert.equal(report.text, 'human direction fulfilled');
+        assert.equal(calls, 2);
+        assert.match(JSON.stringify(contexts[1]), /human direction/);
+        assert.match(viewer.render(100).join('\n'), /human direction fulfilled/);
+        assert.ok(readSidekickHistory(h.runtime.sessionFile).some(message => JSON.stringify(message).includes('human direction fulfilled')));
+        assert.equal(sent.length, blocking ? 0 : 1);
+        if (blocking) assert.match(result.content[0].text, /human direction fulfilled/);
+        viewer.close();
+        assert.equal(h.runtime.isAlive(), true);
+        // A direct message to a settled sidekick resumes its persistent context.
+        controls.sendToSidekick(ctx, 'idle follow-up');
+        await h.runtime.latest().done;
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(calls, 3);
+        assert.match(JSON.stringify(contexts[2]), /original brief/);
+        assert.match(JSON.stringify(contexts[2]), /idle follow-up/);
+        assert.equal(sent.length, blocking ? 1 : 2);
+        assert.deepEqual(h.errors, []);
+      } finally { viewer.dispose(); }
+    });
+  }
   await test('native queued steer activates through user events without a second agent_start', { timeout: 3000 }, async t => {
     const h = await setup(t);
     let started;

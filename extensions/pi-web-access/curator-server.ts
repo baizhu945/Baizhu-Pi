@@ -68,6 +68,7 @@ export interface CuratorServerHandle {
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+	if (res.destroyed || res.writableEnded) return;
 	res.writeHead(status, {
 		"Content-Type": "application/json",
 		"Cache-Control": "no-store",
@@ -77,7 +78,7 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
 
 function parseJSONBody(req: IncomingMessage): Promise<unknown> {
 	return new Promise((resolve, reject) => {
-		let body = "";
+		const chunks: Buffer[] = [];
 		let size = 0;
 		req.on("data", (chunk: Buffer) => {
 			size += chunk.length;
@@ -86,23 +87,26 @@ function parseJSONBody(req: IncomingMessage): Promise<unknown> {
 				reject(new Error("Request body too large"));
 				return;
 			}
-			body += chunk.toString();
+			chunks.push(Buffer.from(chunk));
 		});
 		req.on("end", () => {
 			try {
-				resolve(JSON.parse(body));
+				resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
 				reject(new Error(`Invalid JSON: ${message}`));
 			}
 		});
 		req.on("error", reject);
+		req.on("aborted", () => reject(new Error("Request aborted")));
 	});
 }
 
 async function parseBodyOrSend(req: IncomingMessage, res: ServerResponse): Promise<unknown | null> {
 	try {
-		return await parseJSONBody(req);
+		const value = await parseJSONBody(req);
+		if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid body");
+		return value;
 	} catch (err) {
 		const message = err instanceof Error ? err.message : "Invalid body";
 		const status = message === "Request body too large" ? 413 : 400;
@@ -384,7 +388,7 @@ export function startCuratorServer(
 						try { sseResponse.write(":keepalive\n\n"); } catch {}
 					}
 				}, 15000);
-				req.on("close", () => {
+				res.on("close", () => {
 					if (sseResponse === res) sseResponse = null;
 				});
 				return;
@@ -467,6 +471,7 @@ export function startCuratorServer(
 				touchHeartbeat();
 				try {
 					const results = await callbacks.onAddSearch(trimmedQuery, provider);
+					if (completed) { sendJson(res, 409, { ok: false, error: "Session closed" }); return; }
 					if (results.length === 0) throw new Error("Search returned no provider results");
 					const entries = results.map((result, index): IndexedCuratorSearchEntry => ({
 						...result,
@@ -476,6 +481,7 @@ export function startCuratorServer(
 					callbacks.onAddSearchResults(entries);
 					sendJson(res, 200, { ok: true, ...entries[0], entries });
 				} catch (err) {
+					if (completed) { sendJson(res, 409, { ok: false, error: "Session closed" }); return; }
 					const message = err instanceof Error ? err.message : "Search failed";
 					const entry: IndexedCuratorSearchEntry = {
 						queryIndex: qi,
@@ -528,6 +534,7 @@ export function startCuratorServer(
 				abortInFlightSummarize();
 				const controller = new AbortController();
 				summarizeAbortController = controller;
+				res.on("close", () => { if (!res.writableEnded) controller.abort(); });
 				const requestId = ++summarizeRequestSeq;
 
 				try {
@@ -567,7 +574,7 @@ export function startCuratorServer(
 					return;
 				}
 				const controller = new AbortController();
-				req.on("close", () => controller.abort());
+				res.on("close", () => { if (!res.writableEnded) controller.abort(); });
 				touchHeartbeat();
 				try {
 					const rewritten = await callbacks.onRewriteQuery(query.trim(), controller.signal);
@@ -675,7 +682,8 @@ export function startCuratorServer(
 				reject(new Error("Curator server: invalid address"));
 				return;
 			}
-			const url = `http://${networkConfig.host}:${addr.port}/?session=${sessionToken}`;
+			const host = networkConfig.host.includes(":") && !networkConfig.host.startsWith("[") ? `[${networkConfig.host}]` : networkConfig.host;
+			const url = `http://${host}:${addr.port}/?session=${encodeURIComponent(sessionToken)}`;
 
 			watchdog = setInterval(() => {
 				if (completed) return;
@@ -704,6 +712,7 @@ export function startCuratorServer(
 				close: () => {
 					const wasOpen = markCompleted();
 					try { server.close(); } catch {}
+					server.closeAllConnections();
 					if (wasOpen) {
 						setImmediate(() => callbacks.onCancel("stale"));
 					}

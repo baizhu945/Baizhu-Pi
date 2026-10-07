@@ -6,7 +6,7 @@ let
 
   piTasksLocal = pkgs.stdenvNoCC.mkDerivation {
     pname = "pi-tasks-local";
-    version = "0.9.0-local.2";
+    version = "0.9.0-local.4";
     src = ./tasks;
     nativeCheckInputs = [ pkgs.nodejs pkgs.typescript ];
     dontConfigure = true;

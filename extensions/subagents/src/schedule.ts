@@ -55,6 +55,7 @@ export class SubagentScheduler {
 
   /** Start the scheduler: bind to a session's store and arm enabled jobs. */
   start(pi: ExtensionAPI, ctx: ExtensionContext, manager: AgentManager, store: ScheduleStore): void {
+    this.stop();
     this.pi = pi;
     this.ctx = ctx;
     this.manager = manager;
@@ -152,11 +153,13 @@ export class SubagentScheduler {
     if (!job?.enabled) return undefined;
     if (job.scheduleType === "once") return job.schedule;
     if (job.scheduleType === "interval" && job.intervalMs) {
+      if (!Number.isSafeInteger(job.intervalMs) || job.intervalMs < 1 || job.intervalMs > SubagentScheduler.MAX_TIMER_MS) return undefined;
       // Before the first fire there's no `lastRun`, so fall back to "now" —
       // accurate at create time (setInterval was just armed) and within
       // intervalMs of correct in any pre-first-fire view.
       const base = job.lastRun ? new Date(job.lastRun).getTime() : Date.now();
-      return new Date(base + job.intervalMs).toISOString();
+      const next = base + job.intervalMs;
+      return Number.isFinite(next) && Math.abs(next) <= 8_640_000_000_000_000 ? new Date(next).toISOString() : undefined;
     }
     return undefined;
   }
@@ -167,27 +170,31 @@ export class SubagentScheduler {
     const store = this.store;
     if (!store) return;
     try {
-      if (job.scheduleType === "interval" && job.intervalMs) {
+      if (job.scheduleType === "interval") {
+        if (!Number.isSafeInteger(job.intervalMs) || !job.intervalMs || job.intervalMs < 1
+          || job.intervalMs > SubagentScheduler.MAX_TIMER_MS) throw new Error("Invalid persisted schedule interval");
         const t = setInterval(() => this.executeJob(job.id), job.intervalMs);
         this.intervals.set(job.id, t);
       } else if (job.scheduleType === "once") {
         const target = new Date(job.schedule).getTime();
+        if (!Number.isFinite(target)) throw new Error("Invalid persisted one-shot schedule");
         const delay = target - Date.now();
         if (delay > 0) {
-          const t = setTimeout(() => {
-            this.executeJob(job.id);
-            // Auto-disable one-shots after they fire (mirrors pi-cron-schedule).
-            // Timer callbacks must not leak lock/filesystem failures as uncaught
-            // exceptions; the run itself is already detached.
-            try {
-              store.update(job.id, { enabled: false });
+          // Node clamps delays beyond 2^31-1 ms to 1 ms. Re-arm bounded chunks
+          // so a far-future ISO schedule cannot execute immediately.
+          const arm = () => {
+            if (this.store !== store || !store.get(job.id)?.enabled) return;
+            const remaining = target - Date.now();
+            if (remaining > 0) {
+              this.intervals.set(job.id, setTimeout(arm, Math.min(remaining, SubagentScheduler.MAX_TIMER_MS)));
+            } else {
+              this.intervals.delete(job.id);
+              this.executeJob(job.id);
               const updated = store.get(job.id);
               if (updated) this.emit({ type: "updated", job: updated });
-            } catch (err) {
-              this.emit({ type: "error", jobId: job.id, error: err instanceof Error ? err.message : String(err) });
             }
-          }, delay);
-          this.intervals.set(job.id, t);
+          };
+          arm();
         } else {
           // Past timestamp — disable, mark error, never fire
           try {
@@ -238,7 +245,10 @@ export class SubagentScheduler {
     try {
       // If the job was removed between the read above and this tick, do not
       // launch a detached agent for a schedule that no longer exists.
-      if (!store.update(id, { lastStatus: "running" })) return;
+      if (!store.update(id, {
+        lastStatus: "running",
+        ...(job.scheduleType === "once" ? { enabled: false } : {}),
+      })) return;
     } catch (err) {
       // A timer must never take down the host because the schedule lock or
       // backing directory became unavailable. Do not spawn a run whose state
@@ -293,7 +303,8 @@ export class SubagentScheduler {
       });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      store.update(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
+      try { store.update(id, { lastRun: new Date().toISOString(), lastStatus: "error" }); }
+      catch { /* the timer must still report its original dispatch error */ }
       this.emit({ type: "error", jobId: id, error });
       return;
     }
@@ -398,7 +409,8 @@ export class SubagentScheduler {
     }
     try {
       // Croner validates by construction.
-      new Cron(expr, () => {});
+      const validation = new Cron(expr, () => {});
+      validation.stop();
       return { valid: true };
     } catch (e) {
       return { valid: false, error: e instanceof Error ? e.message : "Invalid cron expression" };

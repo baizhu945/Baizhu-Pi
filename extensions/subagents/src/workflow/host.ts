@@ -282,7 +282,9 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
           : async (worktreePath: string): Promise<void> => {
               // A failed child's gate is never consulted — the runtime reports
               // the child's own failure — so running it would be pure cost.
-              if (spawnedId === undefined || !succeeded(manager.getRecord(spawnedId))) return;
+              const record = spawnedId === undefined ? undefined : manager.getRecord(spawnedId);
+              if (!record || (!succeeded(record)
+                && !(record.status === "running" && record.executionSucceeded === true))) return;
               try {
                 gate = await executeGate(command, worktreePath);
               } catch (error) {

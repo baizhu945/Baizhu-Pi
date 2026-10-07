@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { BackgroundJobTracker } from "./background-jobs.js";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { getPiSpawnCommand } from "./vendor/subagents/pi-spawn.js";
 import type { EffortLevel, ModelKey } from "./preset.js";
 
@@ -45,7 +46,12 @@ export const MAX_REPORT_TEXT_BYTES = 64 * 1024;
 export const MAX_REPORTS = 20;
 const DISPLAY_TRUNCATION = "[Display text truncated; full text is available in the final report.]\n";
 
+export type SidekickMessage = AgentSession["messages"][number];
+export type SidekickSessionEvent = Record<string, unknown>;
+
 export interface HandoffProgress {
+  /** Monotonic display revision, including non-tail tool completions. */
+  revision?: number;
   toolCalls: number;
   recentTools: string[];
   textTail: string;
@@ -130,6 +136,9 @@ export class SidekickRuntime {
   private toolCalls = 0;
   readonly reports = new Map<string, HandoffReport>();
   readonly usage = emptyUsage();
+  private readonly listeners = new Set<(event: SidekickSessionEvent) => void>();
+  private streamingMessage: SidekickMessage | undefined;
+  private lastMessage: SidekickMessage | undefined;
 
   constructor(cfg: SidekickSpawnConfig) { this.cfg = cfg; }
 
@@ -140,9 +149,23 @@ export class SidekickRuntime {
   isBusy(): boolean { return this.pending !== undefined; }
   totalToolCalls(): number { return this.toolCalls; }
   totalHandoffs(): number { return this.completedHandoffs; }
+  get sessionFile(): string { return this.cfg.sessionFile; }
+  currentMessage(): SidekickMessage | undefined { return this.streamingMessage; }
+  lastCompletedMessage(): SidekickMessage | undefined { return this.lastMessage; }
+  subscribe(listener: (event: SidekickSessionEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+  private emitSessionEvent(event: SidekickSessionEvent): void {
+    for (const listener of this.listeners) {
+      try { listener(event); } catch { /* an inspector must never stop the child */ }
+    }
+  }
 
   private notifyProgress(): void {
+    if (this.pending) this.pending.progress.revision = (this.pending.progress.revision ?? 0) + 1;
     try { this.cfg.onProgress?.(); } catch { /* display must not affect work */ }
+    this.emitSessionEvent({ type: "runtime_update" });
   }
   private appendEvent(event: SidekickEvent): void {
     const progress = this.pending?.progress;
@@ -273,6 +296,13 @@ export class SidekickRuntime {
       try {
         if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("Invalid sidekick RPC object");
         this.handleMessage(parsed as Record<string, unknown>);
+        const event = parsed as SidekickSessionEvent;
+        const message = event.message as SidekickMessage | undefined;
+        if (message && typeof message.role === "string") {
+          if (event.type === "message_start" || event.type === "message_update") this.streamingMessage = message;
+          else if (event.type === "message_end") { this.streamingMessage = undefined; this.lastMessage = message; }
+        }
+        this.emitSessionEvent(event);
       } catch (error) {
         this.failChild(child, `Sidekick RPC handler failed: ${errorText(error)}`);
       }
@@ -593,7 +623,7 @@ export class SidekickRuntime {
     const done = new Promise<HandoffReport>((res) => { resolve = res; });
     this.pending = {
       id, startedAt, usage: emptyUsage(),
-      progress: { toolCalls: 0, recentTools: [], textTail: "", startedAt, events: [], droppedEvents: 0 },
+      progress: { revision: 0, toolCalls: 0, recentTools: [], textTail: "", startedAt, events: [], droppedEvents: 0 },
       bg: new BackgroundJobTracker(), generation: 1, brief: normalizeBrief(message), accepted: false, active: false,
       settled: false, promptRequests: new Map([[id, { message, retried: false, generation: 1 }]]),
       abortRequested: false, transientErrors: [], resolve,
@@ -637,6 +667,8 @@ export class SidekickRuntime {
     this.inputBuffer = "";
     this.inputBytes = 0;
     this.finish("error", undefined, "Sidekick process stopped");
+    this.streamingMessage = undefined;
+    this.emitSessionEvent({ type: "runtime_closed" });
     if (child) this.stopChild(child);
   }
 }

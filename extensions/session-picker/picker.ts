@@ -62,11 +62,19 @@ export class SessionPicker implements Component, Focusable {
   private rebuild(snapshot: SessionInfo[] = this.sessions): void {
     const sessions = this.state.named ? snapshot.filter(session => session.name?.trim()) : snapshot;
     const tree = buildTree(sessions);
-    const rows = this.state.sort === "threaded" && !this.state.query.trim()
-      ? flatten(tree.roots, this.state.expanded)
-      : search(sessions, this.state.query, this.state.sort).map(session => ({ node: tree.nodes.get(pathKey(session.path))!, prefix: "" }));
+    if (this.status.startsWith("Regex search")) this.status = "";
+    let rows: Row[];
+    try {
+      rows = this.state.sort === "threaded" && !this.state.query.trim()
+        ? flatten(tree.roots, this.state.expanded)
+        : search(sessions, this.state.query, this.state.sort).map(session => ({ node: tree.nodes.get(pathKey(session.path))!, prefix: "" }));
+    } catch (error) {
+      this.status = error instanceof Error ? error.message : String(error);
+      rows = [];
+    }
     let key = this.touched ? this.state.selected : undefined;
-    while (key && !rows.some(row => row.node.key === key)) key = tree.nodes.get(key)?.parent?.key;
+    const visible = new Set(rows.map(row => row.node.key));
+    while (key && !visible.has(key)) key = tree.nodes.get(key)?.parent?.key;
     // Commit only after the entire new view has been built successfully.
     this.nodes = tree.nodes;
     this.rows = rows;
@@ -127,6 +135,7 @@ export class SessionPicker implements Component, Focusable {
   }
 
   handleInput(data: string): void {
+    if (this.disposed) return;
     this.touched = true;
     if (this.kb.matches(data, "tui.select.cancel")) { this.dispose(); this.done(undefined); return; }
     if (this.kb.matches(data, "tui.input.tab")) {
@@ -172,6 +181,7 @@ export class SessionPicker implements Component, Focusable {
   }
 
   render(width: number): string[] {
+    width = Number.isFinite(width) ? Math.max(1, Math.floor(width)) : 1;
     const lines = [
       this.theme.bold(`Resume Session (${this.state.scope === "current" ? "Current Folder" : "All"})`),
       this.theme.fg("muted", `← collapse · → expand · ${keyText("tui.input.tab")} scope · ${keyText("app.session.toggleSort")} sort: ${this.state.sort} · ${keyText("app.session.toggleNamedFilter")} ${this.state.named ? "named" : "all"}`),

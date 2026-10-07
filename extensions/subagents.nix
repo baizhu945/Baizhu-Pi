@@ -1,6 +1,7 @@
 { pkgs, lib, ... }:
 
 let
+  piPackageDir = "${pkgs.pi-coding-agent}/lib/node_modules/pi-monorepo";
   # Bundle the four runtime-only npm dependencies in a Nix derivation. The
   # fork is a local auto-discovered extension, so it cannot rely on the old
   # pi package manager's node_modules tree for bare imports.
@@ -23,9 +24,9 @@ let
 
   piSubagentsFork = pkgs.stdenvNoCC.mkDerivation {
     pname = "pi-subagents-local-fork";
-    version = "0.19.0";
+    version = "0.19.0-local.3";
     src = ./subagents;
-    nativeBuildInputs = [ pkgs.gnutar ];
+    nativeBuildInputs = [ pkgs.gnutar pkgs.nodejs ];
     dontConfigure = true;
     dontBuild = true;
     installPhase = ''
@@ -48,6 +49,20 @@ let
         \;
         rmdir "$target/package"
       done
+    '';
+    doInstallCheck = true;
+    installCheckPhase = ''
+      runHook preInstallCheck
+      export PI_OFFLINE=1
+      export PI_SUBAGENTS_TEST_DEPS="$out"
+      node ${../tests/subagent-failure-recovery.mjs} ${piPackageDir} "$out"
+      node ${../tests/subagent-notification-rendering.mjs} ${piPackageDir} "$out/index.ts"
+      node ${../tests/plugin-integrity.mjs} ${piPackageDir} "$out" ${./tasks}
+      mkdir -p check-extensions
+      ln -s "$out" check-extensions/pi-subagents
+      ln -s ${./background-commands.ts} check-extensions/background-commands.ts
+      node ${../tests/completion-batching.mjs} ${piPackageDir} "$PWD/check-extensions"
+      runHook postInstallCheck
     '';
   };
 in

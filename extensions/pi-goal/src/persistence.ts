@@ -1,9 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { isNonNegativeFiniteNumber, nonNegativeFiniteNumber, normalizeTokenBudget } from "./accounting.js";
 import type { GoalStatus } from "./prompts.js";
 import { type GoalWait, normalizeGoalWait } from "./wait.js";
+import { withFileLock } from "./file-lock.js";
 
 const GOAL_STATE_ENTRY_TYPE = "goal-state";
 const LEGACY_GOALS_STATE_ENTRY_TYPE = "goals-state";
@@ -196,21 +198,28 @@ function normalizeSafetyPauseCause(value: unknown): SafetyPauseCause | undefined
   return value === "continuation_limit" || value === "no_progress" ? value : undefined;
 }
 
-export function clearLegacyPersistedGoal(cwd: string) {
-  if (!existsSync(STATE_FILE)) return;
-  const goals = readState();
-  delete goals[cwd];
-  mkdirSync(dirname(STATE_FILE), { recursive: true });
-  writeFileSync(STATE_FILE, `${JSON.stringify(goals, null, 2)}\n`);
+export function clearLegacyPersistedGoal(cwd: string, stateFile = STATE_FILE) {
+  if (!existsSync(stateFile)) return;
+  withFileLock(stateFile, () => {
+    const goals = readState(stateFile);
+    if (!Object.hasOwn(goals, cwd)) return;
+    delete goals[cwd];
+    const temporary = join(dirname(stateFile), `.pi-goal-state-${randomUUID()}.tmp`);
+    try {
+      writeFileSync(temporary, `${JSON.stringify(goals, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      renameSync(temporary, stateFile);
+    } finally { try { unlinkSync(temporary); } catch { /* Rename or failed creation. */ } }
+  });
 }
 
-function readState(): Record<string, unknown> {
-  if (!existsSync(STATE_FILE)) return {};
+function readState(stateFile: string): Record<string, unknown> {
   try {
-    const parsed = JSON.parse(readFileSync(STATE_FILE, "utf8")) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    return {};
+    const parsed = JSON.parse(readFileSync(stateFile, "utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Expected a goal state object");
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw new Error(`Refusing to overwrite unreadable goal state ${stateFile}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

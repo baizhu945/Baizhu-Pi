@@ -20,9 +20,8 @@
  *   discarding their comments, key order, and quoting. So the edits are line-wise
  *   and preserve everything they don't touch.
  *
- * That leaves removal best-effort: it recognizes a lowercase bare `false`, and
- * reports `changed: false` for the spellings it cannot rewrite, so the caller
- * refuses honestly rather than announcing a change it did not make.
+ * Flag edits recognize YAML boolean false spellings, quoted keys and comments.
+ * Disabling replaces an existing key rather than introducing a duplicate.
  */
 
 import { existsSync } from "node:fs";
@@ -37,6 +36,11 @@ export const projectAgentsDir = (cwd: string = process.cwd()) => join(cwd, ".pi"
 export const workspaceAgentsDir = (cwd: string = process.cwd()) => join(cwd, ".agents", "agents");
 export const personalAgentsDir = () => join(getAgentDir(), "agents");
 
+export function agentFilePath(directory: string, name: string): string {
+  if (!name.trim() || /[\\/:\p{Cc}]/u.test(name)) throw new Error("Agent filename must not contain separators, colons or control characters");
+  return join(directory, `${name}.md`);
+}
+
 /**
  * Find the file path of a custom agent by name, in discovery-precedence order
  * (project, workspace, then global). Mirrors the load-side precedence in
@@ -47,11 +51,12 @@ export function findAgentFile(
   name: string,
   cwd: string = process.cwd(),
 ): { path: string; location: AgentFileLocation } | undefined {
-  const projectPath = join(projectAgentsDir(cwd), `${name}.md`);
+  if (!name.trim() || /[\\/:\p{Cc}]/u.test(name)) return undefined;
+  const projectPath = agentFilePath(projectAgentsDir(cwd), name);
   if (existsSync(projectPath)) return { path: projectPath, location: "project" };
-  const workspacePath = join(workspaceAgentsDir(cwd), `${name}.md`);
+  const workspacePath = agentFilePath(workspaceAgentsDir(cwd), name);
   if (existsSync(workspacePath)) return { path: workspacePath, location: "workspace" };
-  const personalPath = join(personalAgentsDir(), `${name}.md`);
+  const personalPath = agentFilePath(personalAgentsDir(), name);
   if (existsSync(personalPath)) return { path: personalPath, location: "personal" };
   return undefined;
 }
@@ -96,7 +101,8 @@ function classifyAgentDir(path: string, cwd: string): AgentFileLocation {
 export type DisableOutcome = "disabled" | "already-disabled" | "no-frontmatter";
 
 /** A line that sets `enabled: false`, ignoring trailing whitespace / CR. */
-const ENABLED_FALSE = /^enabled:[ \t]*false[ \t]*$/;
+const ENABLED_FALSE = /^(?:enabled|"enabled"|'enabled')[ \t]*:[ \t]*(?:false|False|FALSE)[ \t]*(?:#.*)?$/;
+const ENABLED_KEY = /^(?:enabled|"enabled"|'enabled')[ \t]*:/;
 /** An opening or closing `---` fence line. */
 const FENCE = /^---[ \t]*$/;
 
@@ -156,7 +162,13 @@ export function disableInContent(content: string): { content: string; outcome: D
   if (!block) return { content, outcome: "no-frontmatter" };
   if (isDisabledContent(content)) return { content, outcome: "already-disabled" };
   const lines = [...block.lines];
-  lines.splice(1, 0, `enabled: false${block.eol}`);
+  const existing = lines.findIndex((line, i) => i > 0 && i < block.closeIdx && ENABLED_KEY.test(line));
+  if (existing !== -1) {
+    const comment = lines[existing].replace(/\r?\n$/, "").match(/[ \t]+#.*$/)?.[0] ?? "";
+    lines[existing] = `enabled: false${comment}${block.eol}`;
+  } else {
+    lines.splice(1, 0, `enabled: false${block.eol}`);
+  }
   return { content: lines.join(""), outcome: "disabled" };
 }
 
@@ -207,15 +219,15 @@ export interface NewAgentInput {
  * ("audit #security") opens a comment and truncates the value. `model` can
  * carry a colon too — pi accepts a `provider/model:thinking` suffix.
  *
- * `tools` and `thinking` are not quoted: both are chosen from fixed menus, and
- * `tools` is a CSV that must stay a bare scalar for the loader's parser.
+ * `tools` is quoted too: the custom menu accepts free text and `*` would be a
+ * YAML alias when emitted bare. The parser still receives the same CSV string.
  */
 export function buildNewAgentFile(input: NewAgentInput): string {
   const modelLine = input.model ? `\nmodel: ${JSON.stringify(input.model)}` : "";
   const thinkingLine = input.thinking ? `\nthinking: ${input.thinking}` : "";
   return `---
 description: ${JSON.stringify(input.description)}
-tools: ${input.tools}${modelLine}${thinkingLine}
+tools: ${JSON.stringify(input.tools)}${modelLine}${thinkingLine}
 prompt_mode: replace
 ---
 
@@ -234,13 +246,13 @@ function formatToolsField(tools: string[] | undefined): string {
 export function serializeAgentFile(cfg: AgentConfig): string {
   const fmFields: string[] = [];
   fmFields.push(`description: ${JSON.stringify(cfg.description)}`);
-  if (cfg.displayName) fmFields.push(`display_name: ${cfg.displayName}`);
+  if (cfg.displayName) fmFields.push(`display_name: ${JSON.stringify(cfg.displayName)}`);
   if (cfg.color) fmFields.push(`color: ${JSON.stringify(cfg.color)}`);
   // Absent means "all built-ins"; an EMPTY list means explicitly zero. Writing
   // `all` for both would hand a deliberately tool-less agent the whole toolbox
   // the first time it is ejected.
   fmFields.push(`tools: ${formatToolsField(cfg.builtinToolNames)}`);
-  if (cfg.model) fmFields.push(`model: ${cfg.model}`);
+  if (cfg.model) fmFields.push(`model: ${JSON.stringify(cfg.model)}`);
   if (cfg.thinking) fmFields.push(`thinking: ${cfg.thinking}`);
   if (cfg.allowedSubagents !== undefined) {
     fmFields.push(`allowed_subagents: ${cfg.allowedSubagents === "all" ? "all" : cfg.allowedSubagents.join(", ")}`);

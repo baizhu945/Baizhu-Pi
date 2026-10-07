@@ -51,6 +51,7 @@ export function setMaxSubagentDepth(n: number): void {
 const NESTED_TOOL_NAMES = ["Agent", "steer_subagent"] as const;
 
 interface NestedSpawnOptions {
+  agentConfig?: AgentConfig;
   description: string;
   model?: Model<any>;
   isolated?: boolean;
@@ -201,6 +202,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       const rootSessionId = context.manager.getRecord(context.parentAgentId)?.rootSessionId;
       const childDepth = context.depth + 1;
       const options: NestedSpawnOptions = {
+        ...(config ? { agentConfig: structuredClone(config) } : {}),
         description: params.description,
         model,
         isolated: invocation.isolated,

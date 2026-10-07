@@ -57,12 +57,17 @@ export class GoalWaitTimer {
   schedule(resumeAt: number, onDue: () => void) {
     this.clear();
     const generation = this.generation;
-    const delay = Math.max(0, Math.min(MAX_GOAL_WAIT_DELAY_MS, resumeAt - Date.now()));
-    this.timer = setTimeout(() => {
-      if (generation !== this.generation) return;
-      this.timer = undefined;
-      onDue();
-    }, delay);
+    const arm = () => {
+      const delay = Math.max(0, Math.min(MAX_GOAL_WAIT_DELAY_MS, resumeAt - Date.now()));
+      this.timer = setTimeout(() => {
+        if (generation !== this.generation) return;
+        this.timer = undefined;
+        if (Date.now() < resumeAt) { arm(); return; }
+        onDue();
+      }, delay);
+      this.timer.unref();
+    };
+    arm();
   }
 }
 

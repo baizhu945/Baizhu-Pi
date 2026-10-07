@@ -24,21 +24,18 @@
  * script `Object.constructor` → the **host** `Function`, i.e. a compiler for
  * arbitrary host-realm code.
  *
- * That said: our injected globals are themselves host closures, so
- * `agent.constructor` is still the host `Function`. The hygiene shrinks the
- * surface; it does not close the hole. **`codeGeneration: { strings: false }` is
- * the load-bearing defense** — it makes `Function("…")` and `eval("…")` throw
- * `EvalError`, so a captured host `Function` cannot compile anything. Treat this
- * as a determinism boundary, not a security boundary against a hostile script.
+ * Helpers are wrapped by realm-native functions. Their promises and errors
+ * also belong to that realm, so helper.constructor cannot expose the worker's
+ * Function and bypass codeGeneration. The global object has a null prototype.
+ * This is still an accident-avoidance boundary, not an OS security sandbox.
  *
  * ## Why determinism is a prelude and not a stub
  *
  * Because `Date` and `Math` come *from the realm*, they cannot be neutered by
  * injection — there is nothing to inject over. So the compiled source is
- * prefixed with a prelude that runs inside the realm and reassigns `Date.now`
- * and `Math.random` in place, then lexically shadows `Date` with a subclass
- * whose zero-argument constructor throws. Lexical shadowing rather than a global
- * assignment because a `const` in the IIFE scope cannot be reached around.
+ * prefixed with a prelude that replaces Date's clock-reading constructor and
+ * Math.random in the realm. Date is also shadowed lexically; its global and
+ * prototype aliases carry the same guard.
  *
  * Determinism is enforced because a workflow's journal is replayed by prefix on
  * resume: a script that reads the clock produces a different prefix on the
@@ -59,11 +56,18 @@ const DETERMINISM_PRELUDE =
   " throw new Error(what + \" is unavailable in workflow scripts (breaks resume)." +
   " Stamp results after the workflow returns, or pass timestamps via `args`.\");" +
   " };" +
-  " RealDate.now = function () { return die(\"Date.now()\"); };" +
   " Math.random = function () { return die(\"Math.random()\"); };" +
-  " return class WorkflowDate extends RealDate {" +
-  " constructor() { if (arguments.length === 0) die(\"new Date()\"); super(...arguments); }" +
-  " };" +
+  " function WorkflowDate(...args) {" +
+  " if (!new.target || args.length === 0) die(\"new Date()\");" +
+  " return Reflect.construct(RealDate, args, new.target);" +
+  " }" +
+  " WorkflowDate.prototype = RealDate.prototype;" +
+  " Object.defineProperty(WorkflowDate.prototype, \"constructor\", { value: WorkflowDate, writable: true, configurable: true });" +
+  " WorkflowDate.now = function () { return die(\"Date.now()\"); };" +
+  " WorkflowDate.parse = function (...args) { return RealDate.parse(...args); };" +
+  " WorkflowDate.UTC = function (...args) { return RealDate.UTC(...args); };" +
+  " globalThis.Date = WorkflowDate;" +
+  " return WorkflowDate;" +
   "})();";
 
 export const WORKER_SOURCE = `"use strict";
@@ -191,6 +195,7 @@ let rootScope = null;
  * that owns it still can.
  */
 let realmContext = null;
+let realmWrap = null;
 /** Nested invocations made so far, against \`workerData.nestedCap\`. */
 let nestedCount = 0;
 
@@ -689,7 +694,8 @@ async function workflowIn(scope, nameOrRef, args) {
     throw new Error('workflow("' + label + '"): ' + describe(error));
   }
 
-  const value = await run(child.agent, child.phase, child.log, child.workflow, child.console, args);
+  const globals = realmScope(child);
+  const value = await run(globals.agent, globals.phase, globals.log, globals.workflow, globals.console, args);
   checkBoundary(value, 'the result of workflow("' + label + '")');
   return value;
 }
@@ -721,22 +727,25 @@ function makeBudget() {
   };
 }
 
+function realmScope(scope) {
+  const console = realmParse("{}");
+  for (const name of Object.keys(scope.console)) console[name] = realmWrap(scope.console[name], false);
+  return {
+    agent: realmWrap(scope.agent, true),
+    phase: realmWrap(scope.phase, false),
+    log: realmWrap(scope.log, false),
+    workflow: realmWrap(scope.workflow, true),
+    console: console,
+  };
+}
+
 /* ------------------------------------------------------------------ *
  * Run
  * ------------------------------------------------------------------ */
 
 async function main() {
   rootScope = makeScope(undefined, 0);
-  const sandbox = {
-    agent: rootScope.agent,
-    parallel: parallel,
-    pipeline: pipeline,
-    phase: rootScope.phase,
-    log: rootScope.log,
-    workflow: rootScope.workflow,
-    budget: makeBudget(),
-    console: rootScope.console,
-  };
+  const sandbox = Object.create(null);
   const context = vm.createContext(sandbox, {
     name: "workflow",
     codeGeneration: { strings: false, wasm: false },
@@ -747,6 +756,24 @@ async function main() {
   realmPush = vm.runInContext("(function (array, value) { array.push(value); })", context);
   realmParse = vm.runInContext("JSON.parse", context);
   realmContext = context;
+  realmWrap = vm.runInContext(
+    '(function (host, asynchronous) { "use strict"; ' +
+    'function safeError(error) { ' +
+    'const copy = new Error(error && typeof error.message === "string" ? error.message : String(error)); ' +
+    'if (error && error.workflowFatal === true) copy.workflowFatal = true; return copy; } ' +
+    'return asynchronous ' +
+    '? async function (...args) { try { return await host(...args); } catch (error) { throw safeError(error); } } ' +
+    ': function (...args) { try { return host(...args); } catch (error) { throw safeError(error); } }; })',
+    context,
+  );
+  const globals = realmScope(rootScope);
+  Object.assign(sandbox, globals);
+  sandbox.parallel = realmWrap(parallel, true);
+  sandbox.pipeline = realmWrap(pipeline, true);
+  const budget = makeBudget();
+  sandbox.budget = realmParse('{"total":null}');
+  sandbox.budget.spent = realmWrap(budget.spent, false);
+  sandbox.budget.remaining = realmWrap(budget.remaining, false);
 
   // meta and args are materialised *inside* the realm rather than injected, so
   // the script sees objects whose prototype is its own Object.prototype and

@@ -4,19 +4,20 @@
  * Commands
  *   /unipi:model          Devin-style picker over the curated preset
  *   /unipi:fusion-preset  Curate the preset (lead / sidekick lists, defaults)
+ *   /unipi:sidekick       Inspect the live sidekick and send direct messages
  *
  * Autocomplete: when the user types `/model`, `/unipi:model` is pinned as the
  * first suggestion (pi's own `/model` cannot be overridden by extensions).
  *
  * Local fork: Fusion tools are registered only when the mode is enabled.
  * Disabled mode leaves the model's tools, skills and prompt unchanged.
- * Enabled mode retains upstream's persistent RPC sidekick and lead policy;
+ * Enabled mode uses a persistent RPC sidekick and coordination-only lead policy;
  * the footer integration shows `Fusion · Lead ◆ Sidekick`.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { AutocompleteProvider, AutocompleteSuggestions } from "@earendil-works/pi-tui";
+import type { AutocompleteProvider, AutocompleteSuggestions, OverlayHandle } from "@earendil-works/pi-tui";
 import { createSpinnerLine, setHerdrWorking, setSharedFusionStatus, UNIPI_PREFIX } from "./vendor/core/index.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -41,13 +42,15 @@ import { SidekickRuntime } from "./sidekick-runtime.js";
 import { estimateSavings } from "./savings.js";
 import { EDIT_NUDGE, bashNudge, leadPolicy, sidekickSystemPrompt, type FusionIdentity } from "./prompts.js";
 import { isTrivialShell, BASH_NUDGE_EVERY } from "./nudge.js";
-import { registerFusionTools } from "./tools.js";
+import { registerFusionTools, type FusionControls } from "./tools.js";
+import { SidekickViewer, SIDEKICK_VIEWPORT_PERCENT } from "./sidekick-viewer.js";
 import { createFusionToolGate } from "./tool-gate.js";
 import { createSessionState, createWorkScope, FUSION_SESSION_STATE, FUSION_WORK_SCOPE, readSessionSelection, readWorkScope, sessionIdOf } from "./session-state.js";
 import { duration } from "./transcript.js";
 
 export const MODEL_COMMAND = `${UNIPI_PREFIX}model`;
 export const PRESET_COMMAND = `${UNIPI_PREFIX}fusion-preset`;
+export const SIDEKICK_COMMAND = `${UNIPI_PREFIX}sidekick`;
 
 export function sidekickSessionPath(leadSessionId?: string): string {
   const id = leadSessionId ?? "default";
@@ -73,7 +76,7 @@ export function isLeadIdle(ctx: { isIdle(): boolean }): boolean {
 /** Body of the live line. `undefined` collapses it without disposing the widget. */
 export function sidekickWakeText(progress: { toolCalls: number; startedAt: number } | undefined): string | undefined {
   if (!progress) return undefined;
-  return `sidekick working · ${String(progress.toolCalls)} tool calls · ${duration(Date.now() - progress.startedAt)} — resumes automatically when done`;
+  return `sidekick working · ${String(progress.toolCalls)} tool calls · ${duration(Date.now() - progress.startedAt)} — /${SIDEKICK_COMMAND} view / message · resumes automatically when done`;
 }
 
 export interface SidekickWakeLine {
@@ -212,10 +215,26 @@ export default function fusionExtension(pi: ExtensionAPI): void {
   let activeSessionId: string | undefined;
   let workScopeId: string | undefined;
   let runtime: SidekickRuntime | undefined;
+  let controls: FusionControls | undefined;
+  let viewer: SidekickViewer | undefined;
+  let viewerOpen = false;
   let lastCtx: ExtensionContext | undefined;
   let leadToolCalls = 0;
   let editNudgedThisTurn = false;
   let bashStreak = 0;
+  let statusTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // Token deltas used to synchronously reload preferences and walk the lead's
+  // session branch several times each. Coalesce UI work, never RPC processing.
+  function scheduleProgressStatus(): void {
+    if (statusTimer) return;
+    const epoch = sessionEpoch;
+    statusTimer = setTimeout(() => {
+      statusTimer = undefined;
+      if (epoch === sessionEpoch) publishStatusLater();
+    }, 250);
+    statusTimer.unref();
+  }
 
   const wakeLine = createSidekickWakeLine({
     isBusy: () => runtime?.isBusy() === true,
@@ -312,15 +331,18 @@ export default function fusionExtension(pi: ExtensionAPI): void {
         thinking: active.sidekickEffort ?? "medium",
         sessionFile: sidekickSessionPath(workScopeId ? `${leadSessionId(ctx)}--${workScopeId}` : leadSessionId(ctx)),
         systemPrompt: sidekickSystemPrompt(identity(ctx)),
-        onProgress: () => publishStatusLater(),
+        onProgress: scheduleProgressStatus,
       });
     }
     return runtime;
   }
 
   function stopRuntime(): void {
+    viewer?.close();
     wakeLine.clear(lastCtx);
     runtime?.kill();
+    clearTimeout(statusTimer);
+    statusTimer = undefined;
     runtime = undefined;
     leadToolCalls = 0;
   }
@@ -343,14 +365,67 @@ export default function fusionExtension(pi: ExtensionAPI): void {
 
   // Register lazily: a loaded-but-disabled extension must have the same model
   // tools and prompt as an absent extension, including at first startup.
-  const toolGate = createFusionToolGate(pi, () => registerFusionTools(pi, {
-    getRuntime,
-    isReportCurrent: (report) => Boolean(lastCtx && isAuthorizedSession(lastCtx)) && runtime?.reports.get(report.id) === report,
-    onReport: (ctx) => publishStatusLater(ctx),
-    onHandoffStart: (ctx) => publishStatus(ctx),
-    onAttach: (ctx) => publishStatusLater(ctx),
-    onDetach: (ctx) => publishStatusLater(ctx),
-  }));
+  const toolGate = createFusionToolGate(pi, () => {
+    controls = registerFusionTools(pi, {
+      getRuntime,
+      isReportCurrent: (report) => Boolean(lastCtx && isAuthorizedSession(lastCtx)) && runtime?.reports.get(report.id) === report,
+      onReport: (ctx) => publishStatusLater(ctx),
+      onHandoffStart: (ctx) => publishStatus(ctx),
+      onAttach: (ctx) => publishStatusLater(ctx),
+      onDetach: (ctx) => publishStatusLater(ctx),
+    });
+  });
+  pi.registerCommand(SIDEKICK_COMMAND, {
+    description: "View the live sidekick conversation and send messages directly to it",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI || (ctx.mode !== undefined && ctx.mode !== "tui")) {
+        ctx.ui.notify(`/${SIDEKICK_COMMAND} needs the interactive TUI`, "error");
+        return;
+      }
+      if (viewerOpen) return;
+      const target = getRuntime(ctx);
+      if (!target || !controls) {
+        ctx.ui.notify("Fusion is not active — pick a Fusion pair with /unipi:model.", "info");
+        return;
+      }
+      const epoch = sessionEpoch;
+      const names = identity(ctx);
+      const assertCurrent = () => {
+        if (epoch !== sessionEpoch || runtime !== target || !isAuthorizedSession(ctx)) throw new Error("This sidekick belongs to an inactive session or branch.");
+      };
+      viewerOpen = true;
+      let opened: SidekickViewer | undefined;
+      let ownedOverlay: OverlayHandle | undefined;
+      let finishPending: (() => void) | undefined;
+      try {
+        await ctx.ui.custom<undefined>((tui, theme, keybindings, done) => {
+          assertCurrent();
+          opened = new SidekickViewer({
+            runtime: target, name: names.sidekickName, thinking: names.sidekickEffort,
+            tui, theme, keybindings, done: result => {
+              if (typeof tui.hideOverlay !== "function") { done(result); return; }
+              const finish = () => {
+                const original = tui.hideOverlay;
+                tui.hideOverlay = () => ownedOverlay?.hide();
+                try { done(result); } finally { tui.hideOverlay = original; }
+              };
+              if (ownedOverlay) finish(); else finishPending = finish;
+            },
+            onSend: message => { assertCurrent(); controls!.sendToSidekick(ctx, message); },
+            onStop: () => { assertCurrent(); void target.abort(); },
+          });
+          viewer = opened;
+          return opened;
+        }, { overlay: true, overlayOptions: { anchor: "center", width: "90%", maxHeight: `${SIDEKICK_VIEWPORT_PERCENT}%` },
+          onHandle: handle => { ownedOverlay = handle; finishPending?.(); finishPending = undefined; } });
+      } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
+      finally {
+        opened?.dispose();
+        if (viewer === opened) viewer = undefined;
+        viewerOpen = false;
+      }
+    },
+  });
   pi.registerCommand("unipi:fusion-stats", {
     description: "Estimated Fusion savings (sidekick tokens priced at lead rates)",
     handler: async (_args, ctx) => ctx.ui.notify(savingsStats(ctx), "info"),

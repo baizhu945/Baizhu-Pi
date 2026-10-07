@@ -9,7 +9,7 @@ They are not fetched or patched during deployment. Upstream's MIT license is
 retained in `LICENSE`. The only external runtime dependency is TypeBox 1.3.7,
 whose npm tarball and fixed hash are declared in `../fusion.nix`. Pi supplies
 its SDK/TUI modules. The implementation is checked against the Pi package in
-Nixpkgs on every build (currently Pi 0.87.1).
+Nixpkgs on every build.
 
 ## Declarative deployment
 
@@ -26,13 +26,83 @@ Do not load the original UniPi Fusion extension alongside this local copy.
 - `/unipi:fusion-preset`: select lead/sidekick candidates.
 - `/unipi:model`: select a Fusion pair or an ordinary single model.
 - `/unipi:fusion-stats`: view sidekick token usage and savings estimates.
+- `/unipi:sidekick`: open the sidekick's live conversation, including while the
+  lead is busy. Scroll with arrows/PgUp/PgDn, press End to follow live output,
+  Enter to compose a direct message, and Esc to cancel the composer or close
+  the viewer. Press `x` twice to stop the current handoff.
 
-When Fusion is enabled, the upstream picker, pair/thinking-level persistence,
-lead and sidekick policies, edit/bash nudges, RPC sidekick, blocking/background
+The viewer shows the current saved branch, streaming text/thinking, tool calls,
+live tool output and errors. It follows the existing RPC child; opening or
+closing it does not start or stop that child. Direct messages steer an active
+handoff at its next processing boundary, or resume the same persistent sidekick
+when idle. Results use the ordinary sidekick completion path: one result in a
+blocking lead tool call, or one background notification. Branch/session changes,
+disabling Fusion and replacing the pair close the viewer and invalidate its
+controls. This command requires the interactive TUI and never enables Fusion.
+
+Rendering retains up to 300 recent messages from the current context and caps
+each displayed message at 16,000 characters and 1,000 display lines; the saved session remains complete.
+The viewer reads session history without rewriting it or attaching a second
+interactive Pi process to the same file.
+
+Local revision `2.20.5-local.7` fixes excessive CPU use with Ctrl+O while waiting:
+
+- Main-surface transcripts show the latest 8 events when collapsed and up to
+  40 when expanded, within 32,768 source characters and 400 rendered lines.
+  Separate final-report previews are capped at 8,192 characters. Omitted history is marked;
+  `/unipi:sidekick` opens the conversation inspector and its saved-session path.
+  These are display limits, independent of the complete session, RPC event
+  retention and the unchanged model-facing report/attachment limits.
+- The SDK renderer context retains transcript components across progress
+  snapshots. Unchanged events reuse their Markdown components; unchanged
+  frames reuse fitted/rail/background lines. Width/theme changes invalidate
+  the appropriate caches, and output at every width stays bounded.
+- Progress polling takes one snapshot per tick and uses a revision counter
+  that also detects changes to earlier tool events. Footer/preferences/lead
+  branch work is coalesced to at most one update per 250 ms; session replacement
+  and shutdown cancel pending display callbacks.
+- The inspector coalesces stream updates to 200 ms, updates its elapsed time
+  once per second only while busy, bounds text before ANSI scanning, and checks
+  only the last saved message for a journal-append race instead of serializing
+  the entire history repeatedly. Closing still releases all timers/listeners.
+
+`render-performance.mjs` exercises Pi's actual `ToolExecutionComponent`
+Ctrl+O path with 300 mixed events and roughly 1.2 million source characters,
+including repeated idle frames, live updates, folding, resizing, theme
+invalidation and final reports. Structural limits and incremental-render tests
+run on every Nix build, alongside the existing runtime/steering/cancellation
+and disabled-mode checks.
+
+When Fusion is enabled, the picker, pair/thinking-level persistence,
+the local lead and sidekick policies, edit/bash nudges, RPC sidekick, blocking/background
 handoffs, steering, live transcript rendering and savings calculations remain.
 The sidekick is lazy-spawned only when a handoff is sent. It has an independent
 persistent session and uses the same machine/worktree. The upstream child
 flags, including `--no-skills`, are unchanged.
+
+## Lead and sidekick responsibilities
+
+While Fusion is active, the lead only clarifies, plans, divides and assigns
+work, manages progress and authorization, reviews evidence, accepts or rejects
+results, and communicates with the user. Every substantive task is executed by
+the sidekick, including tiny changes, simple questions, research, source
+inspection, writing, debugging, tests and urgent recovery. Difficulty, task
+size, correctness risk, urgency, timeouts and sidekick failures do not create
+an exception. The lead must send a new brief, resolve the blocker or report it,
+rather than take over execution. Missing report sections and additional checks
+are also obtained through the sidekick.
+
+The lead decides whether an action is authorized and obtains required user
+approval; the sidekick performs authorized commits, pushes, PR operations,
+configuration changes and other external actions. The executor role itself
+never grants authorization. Final responses relay or summarize accepted
+sidekick work; they do not fill in an incomplete deliverable.
+
+This contract is in the per-turn lead system policy, sidekick system prompt,
+both tools' descriptions and guidance, execution reminders and interrupted-wait
+messages. It is a prompt constraint, not a tool-call enforcement layer: existing
+tools remain registered and model adherence is still required. Edit/bash
+reminder timing is unchanged. Disabled Fusion remains model-neutral.
 
 When Fusion is disabled:
 
@@ -107,6 +177,15 @@ the actual local background-commands extension and real SDK events with fake
 model streams, runs only two harmless local printf commands, and verifies that
 a batched completion reaches the parent once with the final follow-up report.
 
+The sidekick inspector tests cover streaming text/thinking and tool output,
+scrolling, composing/cancelling, stopping, session replacement and disposal.
+Native SDK tests exercise human steering during both blocking and background
+handoffs without duplicate delivery. A real Pi RPC subprocess test uses a local
+fake provider, writes an isolated temporary artifact with Pi's actual `write`
+tool, resumes the saved context and verifies abort acknowledgement. No external
+model is contacted. Nix also builds a strict TypeScript check as a required
+dependency of the extension.
+
 ```sh
 node tests/run.mjs /path/to/pi-package
 ```
@@ -174,3 +253,5 @@ pi-open-tui editor (no extension startup, credentials or model calls):
 ```sh
 node tests/open-tui-completion.mjs /path/to/pi-package /path/to/subagents /path/to/pi-open-tui
 ```
+
+Local revision `2.20.5-local.8` closes only the owned sidekick overlay when another dialog is above it, and defers closure until its handle is mounted. Existing timing/cache/runtime policies are unchanged.

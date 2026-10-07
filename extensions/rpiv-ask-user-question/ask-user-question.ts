@@ -49,7 +49,12 @@ function emitAskUserPromptEvent(pi: ExtensionAPI, params: QuestionParams): void 
 	pi.events.emit(ASK_USER_PROMPT_EVENT, payload);
 }
 
+const blockedCounts = new WeakMap<ExtensionAPI, number>();
 function emitAskUserBlockedEvent(pi: ExtensionAPI, active: boolean): void {
+	const previous = blockedCounts.get(pi) ?? 0;
+	const count = Math.max(0, previous + (active ? 1 : -1));
+	blockedCounts.set(pi, count);
+	if ((previous > 0) === (count > 0)) return;
 	const payload: AskUserBlockedEventPayload = { active };
 	pi.events.emit(ASK_USER_BLOCKED_EVENT, payload);
 }
@@ -60,11 +65,11 @@ function rejectWithoutUi() {
 }
 
 /** Sequential native-dialog walker for RPC hosts; brackets it with the blocked-event pair + terminal bell. */
-async function runRpcPath(pi: ExtensionAPI, ui: DialogUI, typed: QuestionParams) {
+async function runRpcPath(pi: ExtensionAPI, ui: DialogUI, typed: QuestionParams, signal?: AbortSignal) {
 	emitAskUserBlockedEvent(pi, true);
 	try {
 		emitTerminalAttention();
-		return buildQuestionnaireResponse(await runRpcQuestionnaire(ui, typed), typed);
+		return buildQuestionnaireResponse(await runRpcQuestionnaire(ui, typed, signal), typed);
 	} finally {
 		emitAskUserBlockedEvent(pi, false);
 	}
@@ -73,7 +78,13 @@ async function runRpcPath(pi: ExtensionAPI, ui: DialogUI, typed: QuestionParams)
 /** Canonical tool name — single source of truth shared with the reconcile module. */
 export const ASK_USER_QUESTION_TOOL_NAME = "ask_user_question";
 
-const ERROR_NO_UI = "Error: UI not available (running in non-interactive mode)";
+const ERROR_NO_UI = "Error: UI is not available in this session. The user did not see the questions; ask through the interactive lead or parent session.";
+
+export function canAskUser(ctx: Pick<ExtensionContext, "hasUI" | "mode">): boolean {
+	// Fusion's private RPC transport cancels UI requests instead of forwarding
+	// them to a human. Such transport cancellation must never become a decline.
+	return ctx.hasUI && !(ctx.mode === "rpc" && process.env.UNIPI_FUSION_CHILD === "1");
+}
 
 const ERROR_NO_CUSTOM_UI =
 	"Error: this client cannot render the questionnaire (custom UI is unavailable, e.g. RPC/ACP hosts such as Zed or Paseo). The user never saw the questions — do NOT treat this as a decline. Ask the questions as plain chat text instead, without using this tool.";
@@ -191,7 +202,9 @@ function makeSessionFactory(config: {
 	collapseKey: string;
 	canReopenWhileHidden: boolean;
 	sessionRef: SessionRef;
+	overlayHandleRef: OverlayHandleRef;
 	Session: SessionModule["QuestionnaireSession"];
+	signal?: AbortSignal;
 }) {
 	const { ctx, typed, itemsByTab, collapseKey, canReopenWhileHidden, sessionRef, Session } = config;
 	return (
@@ -200,12 +213,22 @@ function makeSessionFactory(config: {
 		keybindings: import("./state/questionnaire-session.js").QuestionnaireSessionConfig["keybindings"],
 		done: (result: QuestionnaireResult) => void,
 	): import("./state/questionnaire-session.js").QuestionnaireSessionComponent => {
+		config.signal?.throwIfAborted();
 		const session = new Session({
 			tui,
 			theme,
 			params: typed,
 			itemsByTab,
-			done,
+			done: result => {
+				// Pi's custom() closer otherwise pops the last overlay, which may be
+				// another dialog above this hidden questionnaire. Redirect that one
+				// synchronous removal to our own public handle and restore the API.
+				const handle = config.overlayHandleRef.current;
+				if (!handle) { done(result); return; }
+				const original = tui.hideOverlay;
+				tui.hideOverlay = () => handle.hide();
+				try { done(result); } finally { tui.hideOverlay = original; }
+			},
 			keybindings,
 			editInput: async (value) => {
 				try {
@@ -238,9 +261,9 @@ function makeSessionFactory(config: {
  * that predate ctx.mode land here: run the dialog walker when the host has the
  * primitives; otherwise tell the model the user never saw the questions.
  */
-async function resolveUndefinedResult(ctx: ExtensionContext, typed: QuestionParams) {
+async function resolveUndefinedResult(ctx: ExtensionContext, typed: QuestionParams, signal?: AbortSignal) {
 	if (hasDialogUI(ctx.ui)) {
-		return buildQuestionnaireResponse(await runRpcQuestionnaire(ctx.ui, typed), typed);
+		return buildQuestionnaireResponse(await runRpcQuestionnaire(ctx.ui, typed, signal), typed);
 	}
 	return buildToolResult(ERROR_NO_CUSTOM_UI, { answers: [], cancelled: true, error: "no_custom_ui" });
 }
@@ -255,9 +278,10 @@ async function resolveUndefinedResult(ctx: ExtensionContext, typed: QuestionPara
  * envelope. unref keeps the timer from holding a non-TUI embedder's process
  * open.
  */
-function prewarmSessionGraph(): void {
+function prewarmSessionGraph(): ReturnType<typeof setTimeout> {
 	const timer = setTimeout(() => void loadQuestionnaireSession().catch(() => undefined), PREWARM_DELAY_MS);
 	timer.unref?.();
+	return timer;
 }
 
 export function buildItemsForQuestion(question: QuestionData): WrappingSelectItem[] {
@@ -281,6 +305,11 @@ export const DEFAULT_PROMPT_GUIDELINES: string[] = [
 export const DEFAULT_TOOL_DESCRIPTION = "Ask for missing requirements, preferences, or decisions. Use multiSelect for multiple choices; options[].preview accepts markdown for single-select comparisons. Users may enter a custom answer or cancel with Esc.";
 
 export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
+	const activeRequests = new Set<AbortController>();
+	const cancelRequests = () => {
+		for (const controller of activeRequests) controller.abort(new Error("Questionnaire cancelled after session change"));
+		activeRequests.clear();
+	};
 	const guidance = validateGuidanceFields(loadConfig().guidance);
 	pi.registerTool({
 		name: ASK_USER_QUESTION_TOOL_NAME,
@@ -290,12 +319,17 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 		promptGuidelines: guidance.promptGuidelines ?? DEFAULT_PROMPT_GUIDELINES,
 		parameters: QuestionParamsSchema,
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, callerSignal, _onUpdate, ctx) {
+			const controller = new AbortController();
+			activeRequests.add(controller);
+			const signal = callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal;
+			try {
+			signal?.throwIfAborted();
 			// Line-terminator normalization runs once here, ahead of validation, so
 			// every downstream consumer — validator, TUI, RPC walker, envelope, prompt
 			// event — sees the same clean text (#192).
 			const typed = normalizeQuestionParams(params as unknown as QuestionParams);
-			if (!ctx.hasUI) return rejectWithoutUi();
+			if (!canAskUser(ctx)) return rejectWithoutUi();
 
 			const validation = validateQuestionnaire(typed);
 			if (!validation.ok) {
@@ -316,7 +350,7 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 			// import entirely; RPC builds that predate ctx.mode are caught by the
 			// custom()-resolved-undefined backstop below. See ./rpc-fallback.ts.
 			if ((ctx as { mode?: string }).mode === "rpc" && hasDialogUI(ctx.ui)) {
-				return runRpcPath(pi, ctx.ui, typed);
+				return runRpcPath(pi, ctx.ui, typed, signal);
 			}
 
 			const itemsByTab: WrappingSelectItem[][] = typed.questions.map((q) => buildItemsForQuestion(q));
@@ -324,6 +358,7 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 			// Lazy — QuestionnaireSession pulls the ~560ms view/TUI render graph;
 			// load it only when the tool runs, not at extension registration.
 			const sessionLoad = await loadQuestionnaireSession();
+			signal?.throwIfAborted();
 			if (!sessionLoad.ok) {
 				return buildToolResult(sessionLoad.message, { answers: [], cancelled: true, error: sessionLoad.error });
 			}
@@ -345,6 +380,8 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 			// the session may emit `setHidden` only when it was actually registered;
 			// otherwise collapse falls back to the visible one-line row.
 			const canReopenWhileHidden = removeOverlayInputListener !== undefined;
+			const onAbort = () => { if (overlayHandleRef.current) sessionRef.current?.cancel(); };
+			signal?.addEventListener("abort", onAbort, { once: true });
 
 			emitAskUserBlockedEvent(pi, true);
 			try {
@@ -357,7 +394,9 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 						collapseKey,
 						canReopenWhileHidden,
 						sessionRef,
+						overlayHandleRef,
 						Session: QuestionnaireSession,
+						signal,
 					}),
 					{
 						overlay: true,
@@ -370,23 +409,29 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 						onHandle: (handle) => {
 							overlayHandleRef.current = handle;
 							sessionRef.current?.setOverlayHandle(handle);
+							if (signal.aborted) sessionRef.current?.cancel();
 						},
 					},
 				);
+				signal?.throwIfAborted();
 
 				if (result === undefined) {
-					return resolveUndefinedResult(ctx, typed);
+					return resolveUndefinedResult(ctx, typed, signal);
 				}
 
 				return buildQuestionnaireResponse(result, typed);
 			} finally {
+				signal?.removeEventListener("abort", onAbort);
 				removeOverlayInputListener?.();
 				emitAskUserBlockedEvent(pi, false);
 			}
+			} finally { activeRequests.delete(controller); }
 		},
 	});
 
-	prewarmSessionGraph();
+	const prewarm = prewarmSessionGraph();
+	pi.on("session_before_switch", cancelRequests);
+	pi.on("session_shutdown", () => { clearTimeout(prewarm); cancelRequests(); });
 }
 
 export { buildQuestionnaireResponse, buildToolResult };

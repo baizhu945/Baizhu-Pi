@@ -22,7 +22,7 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
-import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentConfig, AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
@@ -166,6 +166,8 @@ interface SpawnArgs {
 }
 
 interface SpawnOptions {
+  /** Internal definition snapshot from a nested branch; never accepted by public RPC. */
+  agentConfig?: AgentConfig;
   description: string;
   /**
    * Optional memorable name for this instance, becoming a second handle
@@ -410,6 +412,15 @@ export class AgentManager {
   private runningBackground = 0;
   /** Number of currently running foreground (blocking) agents. */
   private runningForeground = 0;
+  private claimedSlots = new Map<string, Pool>();
+
+  private releaseSlot(id: string): void {
+    const pool = this.claimedSlots.get(id);
+    if (pool === undefined) return;
+    this.claimedSlots.delete(id);
+    if (pool === "background") this.runningBackground--;
+    else this.runningForeground--;
+  }
 
   constructor(
     onComplete?: OnAgentComplete,
@@ -632,6 +643,7 @@ export class AgentManager {
       () => { this.startups.delete(id); },
       (err) => {
         this.startups.delete(id);
+        this.releaseSlot(id);
         if (queuedPool !== undefined) {
           // Mirrors settleRun: an inline caller gets this failure as a throw
           // out of spawnAndWait, so an unconsumed record would ALSO nudge the
@@ -704,15 +716,13 @@ export class AgentManager {
     // every later blocking spawn queues forever). The two startup exits below
     // never reach `settleRun`, so they hand the slot back themselves.
     const pool = this.poolFor(record);
-    const releaseSlot = () => {
-      if (pool === "background") this.runningBackground--;
-      else if (pool === "foreground") this.runningForeground--;
-    };
+    const releaseSlot = () => this.releaseSlot(id);
     record.status = "running";
     record.startedAt = Date.now();
     record.startGate = undefined;
     if (pool === "background") this.runningBackground++;
     else if (pool === "foreground") this.runningForeground++;
+    if (pool !== undefined) this.claimedSlots.set(id, pool);
 
     // Worktree isolation: try to create a temporary git worktree. Strict —
     // fail loud if not possible (no silent fallback to main tree). Done BEFORE
@@ -784,6 +794,7 @@ export class AgentManager {
     const promise = runAgent(ctx, type, prompt, {
       pi,
       agentId: id,
+      agentConfig: options.agentConfig,
       model: options.model,
       isolated: options.isolated,
       inheritContext: options.inheritContext,
@@ -873,16 +884,13 @@ export class AgentManager {
       },
     })
       .then(async ({ responseText, session, failure, structuredJson, structuredRetried }) => {
+        record.executionSucceeded = !failure && record.status !== "stopped";
         // Don't overwrite status if externally stopped via abort(). A subagent
         // has no turn-count cutoff in this fork: clean runs complete, while
         // provider/session failures remain honest errors.
-        if (record.status !== "stopped") {
-          if (failure) {
-            record.status = "error";
-            record.error = failure;
-          } else {
-            record.status = "completed";
-          }
+        if (failure && record.status !== "stopped") {
+          record.error = failure;
+          this.abortOwnedChildren(id);
         }
         record.result = responseText;
         // Kept beside `result`, never inside it: `result` is prose meant for a
@@ -891,7 +899,6 @@ export class AgentManager {
         record.structuredJson = structuredJson;
         record.structuredRetried = structuredRetried;
         record.session = session;
-        record.completedAt ??= Date.now();
 
         detach();
 
@@ -922,6 +929,9 @@ export class AgentManager {
             // what a human reads, so the note still belongs on it.
             record.result = (record.result ?? "") +
               `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
+          } else if (wtResult.error && wtResult.path) {
+            record.result = (record.result ?? "")
+              + `\n\nWorktree cleanup failed: ${wtResult.error}\nChanges preserved in \`${wtResult.path}\`; no recovery command was executed.`;
           }
         }
 
@@ -929,6 +939,8 @@ export class AgentManager {
         // parent turn; their result is steered back into the owner's session.
         // Stop them only when the parent itself ended abnormally or was
         // explicitly stopped.
+        if (record.status !== "stopped") record.status = failure ? "error" : "completed";
+        record.completedAt ??= Date.now();
         this.abortOwnedChildrenIfTerminated(record);
 
         settle(true);
@@ -936,11 +948,8 @@ export class AgentManager {
       })
       .catch(async (err) => {
         // Don't overwrite status if externally stopped via abort()
-        if (record.status !== "stopped") {
-          record.status = "error";
-        }
         record.error = err instanceof Error ? err.message : String(err);
-        record.completedAt ??= Date.now();
+        this.abortOwnedChildren(id);
 
         detach();
 
@@ -955,11 +964,16 @@ export class AgentManager {
           try {
             const wtResult = await cleanupWorktree(pi, baseCwd, record.worktree, options.description);
             record.worktreeResult = wtResult;
+            if (wtResult.error && wtResult.path) {
+              record.error += `\nWorktree cleanup failed: ${wtResult.error}\nChanges preserved in \`${wtResult.path}\`.`;
+            }
           } catch { /* ignore cleanup errors */ }
         }
 
         this.abortOwnedChildrenIfTerminated(record);
 
+        if (record.status !== "stopped") record.status = "error";
+        record.completedAt ??= Date.now();
         settle(false);
         return "";
       });
@@ -996,8 +1010,7 @@ export class AgentManager {
    */
   private settleRun(record: AgentRecord, _guardCallback: boolean, pool: Pool | undefined): void {
     if (!record.isBackground) record.resultConsumed = true;
-    if (pool === "background") this.runningBackground--;
-    else if (pool === "foreground") this.runningForeground--;
+    this.releaseSlot(record.id);
 
     if (!this.disposed) {
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
@@ -1174,6 +1187,7 @@ export class AgentManager {
 
       const start = () => this.startResume(id, record, prompt, signal, options);
       if (occupiesPoolSlot(record) && !this.poolHasRoom("background")) {
+        if (!this.armQueuedAbort(id, signal)) return record;
         // At the concurrency limit — queue it, drains when a slot frees. A
         // detached resume has no inline caller, hence nothing to release. The
         // queue is shared with spawns, whose startup is async, so entries are
@@ -1299,6 +1313,8 @@ export class AgentManager {
     parentSignal: AbortSignal | undefined,
     options: ResumeOptions,
   ): Promise<void> {
+    record.queuedAbortCleanup?.();
+    record.queuedAbortCleanup = undefined;
     const session = record.session;
     if (!session) {
       record.status = "error";
@@ -1313,7 +1329,10 @@ export class AgentManager {
 
     record.status = "running";
     record.startedAt = Date.now();
-    if (occupiesPoolSlot(record)) this.runningBackground++;
+    if (occupiesPoolSlot(record)) {
+      this.runningBackground++;
+      this.claimedSlots.set(id, "background");
+    }
 
     // Install the fresh controller BEFORE any lifecycle callback. A callback can
     // synchronously stop the resumed row; it must abort this run, not the
@@ -1354,7 +1373,7 @@ export class AgentManager {
       // Detached nested children may outlive a successful resumed turn; only a
       // failed/stopped owner should cancel them.
       this.abortOwnedChildrenIfTerminated(record);
-      if (occupiesPoolSlot(record)) this.runningBackground--;
+      this.releaseSlot(id);
       if (!this.disposed) {
         try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       }
@@ -1469,7 +1488,7 @@ export class AgentManager {
     const wanted = name.toLowerCase();
     let fallback: AgentRecord | undefined;
     for (const record of this.agents.values()) {
-      if (record.parentAgentId !== undefined) continue;
+      if (!isTopLevelAgent(record)) continue;
       // Handle and alias share one namespace, so at most one agent answers a
       // name and it makes no difference which of the two matched.
       if (record.handle?.toLowerCase() !== wanted && record.alias?.toLowerCase() !== wanted) continue;
@@ -1478,7 +1497,7 @@ export class AgentManager {
     }
     if (fallback) return { kind: "live", record: fallback };
     const byId = this.agents.get(name);
-    if (byId?.parentAgentId === undefined && byId !== undefined) return { kind: "live", record: byId };
+    if (byId !== undefined && isTopLevelAgent(byId)) return { kind: "live", record: byId };
     // Only once nothing live answers: a tombstone is a conversation to reopen,
     // and reopening one while its record still exists would fork the session.
     for (const entry of this.tombstones.values()) {
@@ -1550,6 +1569,7 @@ export class AgentManager {
     // nothing can observe a session that is half torn down.
     record.session = undefined;
     this.agents.delete(id);
+    this.releaseSlot(id);
     // A failed startup keeps its (rejected) entry so a late awaitStartup still
     // sees it; drop it with the record so the map can't grow unbounded.
     this.startups.delete(id);
@@ -1687,6 +1707,9 @@ export class AgentManager {
     const sessions = [...this.agents.values()].map(record => record.session);
     this.agents.clear();
     this.startups.clear();
+    this.claimedSlots.clear();
+    this.runningBackground = 0;
+    this.runningForeground = 0;
     if (pi) {
       // Prune any orphaned git worktrees (crash recovery). Detached: dispose runs
       // on the shutdown path, which cannot wait for git. Started before the awaited

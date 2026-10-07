@@ -58,11 +58,16 @@ export default function (pi: ExtensionAPI): void {
     handler: async (_args, ctx) => {
       if (ctx.mode !== "tui") { ctx.ui.notify("Session picker requires terminal UI", "warning"); return; }
       const state = newState();
+      const sessionId = ctx.sessionManager.getSessionId();
+      const current = () => {
+        try { return ctx.sessionManager.getSessionId() === sessionId; } catch { return false; }
+      };
       const currentPath = ctx.sessionManager.getSessionFile();
       while (true) {
         const choice = await ctx.ui.custom<Choice>((tui, theme, keys, done) => new SessionPicker(
           state, sessionLoader(ctx), theme, keys, () => tui.requestRender(), done, currentPath,
         ));
+        if (!current()) return;
         if (!choice) return;
         try {
           if (choice.kind === "resume") {
@@ -71,6 +76,7 @@ export default function (pi: ExtensionAPI): void {
           }
           if (choice.kind === "rename") {
             const name = await ctx.ui.input("Rename session", choice.name ?? "New name");
+            if (!current()) return;
             if (name?.trim()) SessionManager.open(choice.path).appendSessionInfo(name.trim());
           } else {
             if (currentPath && pathKey(choice.path) === pathKey(currentPath)) {
@@ -78,16 +84,20 @@ export default function (pi: ExtensionAPI): void {
               continue;
             }
             if (!await ctx.ui.confirm("Delete session?", choice.path)) continue;
+            if (!current()) return;
             let trashed = false;
             try {
               const result = await pi.exec("trash", choice.path.startsWith("-") ? ["--", choice.path] : [choice.path]);
               trashed = result.code === 0 || !existsSync(choice.path);
             } catch { /* The trash command may not be installed. */ }
+            if (!current()) return;
             if (!trashed && await ctx.ui.confirm("Delete permanently?", "Trash is unavailable. Only this session file will be deleted; child sessions are kept.")) {
+              if (!current()) return;
               await unlink(choice.path);
             }
           }
         } catch (error) {
+          if (!current()) return;
           ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
         }
       }

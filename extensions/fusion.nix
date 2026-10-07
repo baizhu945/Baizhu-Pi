@@ -12,7 +12,7 @@ let
   # Type-check against the exact Pi SDK this build ships against, with the
   # host's own compiler settings. No network and no extra package managers.
   fusionTypecheck = pkgs.runCommand "pi-fusion-typecheck" {
-    version = "2.20.5-local.4";
+    version = "2.20.5-local.8";
     nativeBuildInputs = [ pkgs.nodejs pkgs.typescript ];
   } ''
     cp -R ${./fusion} ./src
@@ -47,7 +47,7 @@ let
 
   piFusionLocal = pkgs.stdenvNoCC.mkDerivation {
     pname = "pi-fusion-local";
-    version = "2.20.5-local.4";
+    version = "2.20.5-local.8";
     src = ./fusion;
     nativeBuildInputs = [ pkgs.gnutar ];
     nativeCheckInputs = [ pkgs.nodejs pkgs.typescript ];
@@ -65,7 +65,7 @@ let
       export PI_FUSION_TEST_SHELL=${pkgs.bash}/bin/bash
       mkdir -p "$HOME"
       node tests/run.mjs ${piPackageDir}
-      echo "Type-check passed against ${piPackageDir}"
+      echo "Type-check passed: ${fusionTypecheck} (SDK ${piPackageDir})"
       runHook postCheck
     '';
     installPhase = ''

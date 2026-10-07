@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { isTrivialShell } from "../src/nudge.js";
-import { leadPolicy, EDIT_NUDGE, bashNudge } from "../src/prompts.js";
+import { leadPolicy, sidekickSystemPrompt, EDIT_NUDGE, bashNudge } from "../src/prompts.js";
 
 test("recognizes read-only trivial shell commands", () => {
   for (const command of ["git status", "ls -la src", "cd /x && git log --oneline -3", "rg -n foo packages"]) {
@@ -34,17 +34,30 @@ test("ordinary shell inspection remains trivial without granting command executi
   }
 });
 
-test("concise guidance keeps delegation exceptions and invocation rules", () => {
-  const policy = leadPolicy({ leadName: "lead", leadEffort: "", sidekickName: "side", sidekickEffort: "" });
+test("all lead guidance requires execution delegation without difficulty or urgency exceptions", () => {
+  const identity = { leadName: "lead", leadEffort: "", sidekickName: "side", sidekickEffort: "" };
+  const policy = leadPolicy(identity);
   for (const text of [policy, EDIT_NUDGE, bashNudge(4)]) {
-    assert.match(text, /sidekick/);
-    assert.match(text, /correctness-critical/);
-    assert.match(text, /urgent/);
-    assert(text.length < 1200);
+    assert.match(text, /coordination-only/);
+    assert.match(text, /never execute task work yourself/);
+    assert.match(text, /All task execution belongs to the sidekick/);
+    assert.match(text, /complexity, difficulty, size, urgency, correctness risk/);
+    assert.match(text, /no execution exceptions/);
+    assert.doesNotMatch(text, /may be done directly|keep correctness-critical|work with the lead/);
   }
   assert.match(policy, /only your brief/);
   assert.match(policy, /block:false/);
-  assert.match(policy, /same sidekick/);
+  assert.match(policy, /same persistent sidekick, not a second worker/);
   assert.match(policy, /read_subagent/);
-  assert.match(policy, /review its result/);
+  assert.match(policy, /one-line changes, simple questions, explanations, calculations/);
+  assert.match(policy, /If the sidekick fails, times out, lacks a tool/);
+  assert.match(policy, /Never take over execution/);
+  assert.match(policy, /Completion status alone is not acceptance/);
+  assert.match(policy, /Do not disable Fusion merely to execute the task yourself/);
+  const executor = sidekickSystemPrompt(identity);
+  assert.match(executor, /You own all task execution/);
+  assert.match(executor, /You carry out authorized commits, pushes, PR operations/);
+  assert.match(executor, /never infer authorization from your executor role/);
+  assert.match(executor, /checks actually run with outcomes/);
+  assert.doesNotMatch(executor, /Leave.*commits.*lead/);
 });

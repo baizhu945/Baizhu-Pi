@@ -25,6 +25,7 @@ export function mockPi() {
   const lifecycleHandlers = new Map<string, ((...args: any[]) => any)[]>();
 
   const pi = {
+    registerShortcut: vi.fn(),
     registerTool(def: any) { tools.set(def.name, def); },
     registerCommand(name: string, def: any) { commands.set(name, def); },
     on(event: string, handler: any) {
@@ -119,4 +120,3 @@ export function mockSessionCtx(sessionId: string, opts?: { persisted?: boolean; 
     },
   };
 }
-

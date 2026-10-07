@@ -1,4 +1,5 @@
 import type { QuestionParams } from "./types.js";
+import { stripTerminalSequences } from "@earendil-works/pi-tui";
 
 /**
  * Normalize line terminators in one model-supplied text field (#192).
@@ -18,7 +19,8 @@ import type { QuestionParams } from "./types.js";
  *   pi-coding-agent's own display normalization (`normalizeDisplayText`).
  */
 export function normalizeLineTerminators(text: string): string {
-	return text.replace(/\r\n/g, "\n").replace(/\r/g, "");
+  return stripTerminalSequences(text.replace(/\r\n/g, "\n").replace(/\r/g, ""))
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "");
 }
 
 /**

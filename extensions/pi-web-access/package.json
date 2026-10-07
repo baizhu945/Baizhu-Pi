@@ -1,6 +1,6 @@
 {
   "name": "pi-web-access",
-  "version": "0.35.0",
+  "version": "0.35.0-local.4",
   "description": "Local Pi web search and content extraction. Supports OpenAI, Parallel MCP, Firecrawl, SearXNG, DuckDuckGo, Gemini API/ADC, Kimi, Exa, AnySearch, xAI, Baizhi and Z.ai.",
   "type": "module",
   "scripts": {

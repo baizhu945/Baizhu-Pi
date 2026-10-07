@@ -13,8 +13,8 @@ describe("four-tool task tracker", () => {
     const emit = vi.spyOn(mock.pi.events, "emit");
     initExtension(mock.pi as unknown as ExtensionAPI);
     expect([...mock.tools.keys()]).toEqual(["TaskCreate", "TaskList", "TaskGet", "TaskUpdate"]);
-    expect(listen).not.toHaveBeenCalled();
-    expect(emit).not.toHaveBeenCalled();
+    expect(listen.mock.calls.every(([channel]) => channel.startsWith("ui:widget-collapse:"))).toBe(true);
+    expect(emit.mock.calls.every(([channel]) => channel.startsWith("ui:widget-collapse:"))).toBe(true);
     for (const tool of mock.tools.values()) {
       expect(JSON.stringify({ description: tool.description, promptSnippet: tool.promptSnippet,
         promptGuidelines: tool.promptGuidelines, parameters: tool.parameters })).not.toMatch(/TaskExecute|TaskOutput|TaskStop/);

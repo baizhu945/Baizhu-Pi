@@ -6,7 +6,8 @@
 // expressed as JSON sort specs — see task-sort.ts; the glyphs tasks are drawn with
 // are plain JSON strings — see task-glyphs.ts.
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { TaskGlyphsConfig } from "./task-glyphs.js";
@@ -27,11 +28,26 @@ export interface TasksConfig {
 
 const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
 
-function readTasksConfig(configPath: string): TasksConfig {
+function readTasksConfig(configPath: string, strict = false): TasksConfig {
   try {
     const parsed: unknown = JSON.parse(readFileSync(configPath, "utf-8"));
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as TasksConfig : {};
-  } catch {
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      if (strict) throw new Error("Expected a tasks configuration object");
+      return {};
+    }
+    const config = parsed as TasksConfig;
+    if (!["memory", "session", "session-global", "project"].includes(config.taskScope ?? "session")) delete config.taskScope;
+    if (!["never", "on_list_complete", "on_task_complete"].includes(config.autoClearCompleted ?? "on_list_complete")) delete config.autoClearCompleted;
+    for (const key of ["collapseCompleted", "showAll"] as const) {
+      if (config[key] !== undefined && typeof config[key] !== "boolean") delete config[key];
+    }
+    if (config.maxVisible !== undefined && (!Number.isSafeInteger(config.maxVisible) || config.maxVisible < 0)) delete config.maxVisible;
+    if (config.glyphs !== undefined && (config.glyphs === null || typeof config.glyphs !== "object" || Array.isArray(config.glyphs))) delete config.glyphs;
+    return config;
+  } catch (error) {
+    if (strict && (error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error(`Refusing to overwrite unreadable tasks config ${configPath}`);
+    }
     return {};
   }
 }
@@ -56,6 +72,7 @@ export function loadTasksConfig(cwd: string, agentDir = getAgentDir()): TasksCon
 
 export function saveTasksConfig(config: TasksConfig, cwd: string, agentDir = getAgentDir()): void {
   const configPath = join(cwd, ".pi", "tasks-config.json");
+  readTasksConfig(configPath, true);
   const globalConfig = loadGlobalTasksConfig(agentDir);
   // Compared as JSON so that object-valued settings (a custom sortOrder spec) are
   // matched by value; for the primitives this config holds it is equivalent to !==.
@@ -72,5 +89,11 @@ export function saveTasksConfig(config: TasksConfig, cwd: string, agentDir = get
   );
   if (glyphOverrides.length > 0) projectOverrides.glyphs = Object.fromEntries(glyphOverrides);
   mkdirSync(dirname(configPath), { recursive: true });
-  writeFileSync(configPath, JSON.stringify(projectOverrides, null, 2));
+  const temporary = `${configPath}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, JSON.stringify(projectOverrides, null, 2), { flag: "wx", mode: 0o600 });
+    renameSync(temporary, configPath);
+  } finally {
+    try { unlinkSync(temporary); } catch { /* Renamed or never created. */ }
+  }
 }

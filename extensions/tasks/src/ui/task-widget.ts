@@ -11,17 +11,19 @@
  * replace — see task-glyphs.ts.
  */
 
+import { stripVTControlCharacters } from "node:util";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { resolveTaskGlyphs } from "../task-glyphs.js";
 import type { TaskStore } from "../task-store.js";
 import type { TasksConfig } from "../tasks-config.js";
+import { widgetCollapseHint } from "./widget-collapse.js";
 
 // ---- Truncation ----
 
 import type { Task } from "../types.js";
 
 function truncateFromTop(tasks: Task[], limit: number): Task[] {
-  return tasks.slice(-limit);
+  return limit > 0 ? tasks.slice(-limit) : [];
 }
 
 function truncateFromBottom(tasks: Task[], limit: number): Task[] {
@@ -48,6 +50,8 @@ export type UICtx = {
 };
 
 const DEFAULT_MAX_VISIBLE_TASKS = 10;
+const oneLine = (text: string) => stripVTControlCharacters(text)
+  .replace(/[\p{Cc}\u200E\u200F\u202A-\u202E\u2066-\u2069]+/gu, " ");
 
 /** Per-task runtime metrics (elapsed time, token usage). */
 export interface TaskMetrics {
@@ -88,6 +92,7 @@ export class TaskWidget {
   private tui: any | undefined;
   /** Whether the widget callback is currently registered. */
   private widgetRegistered = false;
+  private collapsed = false;
 
   constructor(
     private store: TaskStore,
@@ -95,7 +100,18 @@ export class TaskWidget {
   ) {}
 
   setStore(store: TaskStore) {
+    if (store === this.store) return;
+    this.dispose();
+    this.activeTaskIds.clear();
+    this.metrics.clear();
+    this.widgetFrame = 0;
     this.store = store;
+  }
+
+  setCollapsed(collapsed: boolean) {
+    if (this.collapsed === collapsed) return;
+    this.collapsed = collapsed;
+    this.update();
   }
 
   setUICtx(ctx: UICtx) {
@@ -174,14 +190,18 @@ export class TaskWidget {
     const statusText = `${tasks.length} tasks (${parts.join(", ")})`;
 
     const spinnerFrame = glyphs.spinner[this.widgetFrame % glyphs.spinner.length];
-    const lines: string[] = [truncate(theme.fg("accent", glyphs.header) + " " + theme.fg("accent", statusText))];
+    const lines: string[] = [truncate(theme.fg("accent", glyphs.header) + " " + theme.fg("accent", statusText)
+      + (this.collapsed ? widgetCollapseHint(theme) : ""))];
+    if (this.collapsed) return lines;
 
     // Collapsing only decides what goes in the list; the visible-limit logic below
     // then runs unchanged over whatever remains.
     const collapseCompleted = this.config.collapseCompleted ?? false;
     const listed = collapseCompleted ? tasks.filter(t => t.status !== "completed") : tasks;
     const showAll = this.config.showAll ?? false;
-    const limit = this.config.maxVisible ?? DEFAULT_MAX_VISIBLE_TASKS;
+    const requestedLimit = this.config.maxVisible;
+    const limit = typeof requestedLimit === "number" && Number.isFinite(requestedLimit) && requestedLimit >= 0
+      ? Math.floor(requestedLimit) : DEFAULT_MAX_VISIBLE_TASKS;
     // Narrowed rather than defaulted: config is hand-editable JSON, and an
     // unrecognised value would index TRUNCATE_FNS to undefined and blank the widget.
     const hiddenAt = this.config.hiddenAt === "top" ? "top" : "bottom";
@@ -223,7 +243,7 @@ export class TaskWidget {
 
       let text: string;
       if (isActive) {
-        const form = task.activeForm || task.subject;
+        const form = oneLine(task.activeForm || task.subject);
         const m = this.metrics.get(task.id);
         let stats = "";
         if (m) {
@@ -239,9 +259,9 @@ export class TaskWidget {
           theme.fg("accent", form + glyphs.trailingEllipsis)
         }${stats}`;
       } else if (task.status === "completed") {
-        text = `  ${statusGlyph} ${theme.fg("dim", theme.strikethrough("#" + task.id + " " + task.subject))}`;
+        text = `  ${statusGlyph} ${theme.fg("dim", theme.strikethrough("#" + task.id + " " + oneLine(task.subject)))}`;
       } else {
-        text = `  ${statusGlyph} ${theme.fg("dim", "#" + task.id)} ${task.subject}`;
+        text = `  ${statusGlyph} ${theme.fg("dim", "#" + task.id)} ${oneLine(task.subject)}`;
       }
 
       lines.push(truncate(text + suffix));
@@ -311,7 +331,7 @@ export class TaskWidget {
       clearInterval(this.widgetInterval);
       this.widgetInterval = undefined;
     }
-    if (this.uiCtx) {
+    if (this.uiCtx && this.widgetRegistered) {
       this.uiCtx.setWidget("tasks", undefined);
     }
     this.widgetRegistered = false;

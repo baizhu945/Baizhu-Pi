@@ -10,7 +10,7 @@ Edit this source and run `home-manager build` followed by `home-manager switch`.
 No npm installation is required. The upstream media and GitHub workflows are
 omitted; source, tests, license, documentation and lockfile are retained.
 
-Pi 0.99.2 supplies the SDK, TUI and TypeBox. All three are declared as `"*"`
+Pi's Nix package supplies the SDK, TUI and TypeBox. All three are declared as `"*"`
 peer dependencies. TypeBox is only a development dependency; no runtime
 `node_modules` is deployed. This prevents a second copy of host modules and
 fixes the host-provided extension package warning.
@@ -32,3 +32,18 @@ been removed. TaskCreate no longer has an agentType parameter. Task data is
 preserved, including any older metadata, but no longer drives subagent execution.
 Nix checks the remaining test suite and verifies all four deployed tool schemas
 and prompts through Pi's real extension loader.
+
+The local.3 revision coordinates Alt+W with pi-subagents: one shortcut folds or
+expands the task widget, agent widget and fleet list. Collapsed widgets show a
+summary; execution and task data are unchanged. Either plugin can run alone.
+The event bus payloads are narrowed from the current SDK's unknown type.
+
+Task forks copy nested metadata independently. Memory lists and widget metrics
+reset at session boundaries. Shared-file seeding and empty cleanup recheck the
+file under its lock; malformed persisted data cannot be overwritten by a
+mutation. Atomic writes use private, unique temporary files. Metadata keys do
+not alter prototypes, and unsafe session IDs cannot escape the task directory.
+The startup sweep respects autoClearCompleted: never. Widget limits and terminal
+control characters are handled without changing the underlying task text.
+
+Further local audit: project settings now use private atomic writes and refuse to replace malformed existing JSON. Full Biome/type/Vitest checks include these cases.
