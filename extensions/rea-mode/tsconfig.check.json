@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "typeRoots": ["/nix/store/y2vvpsg9c2rq0mrgmc1s6dq64376k8lp-pi-coding-agent-1.0.3/lib/node_modules/pi-monorepo/node_modules/@types"],
+    "paths": {
+      "@earendil-works/pi-coding-agent": ["/nix/store/y2vvpsg9c2rq0mrgmc1s6dq64376k8lp-pi-coding-agent-1.0.3/lib/node_modules/pi-monorepo/dist/index.d.ts"],
+      "@earendil-works/pi-agent-core": ["/nix/store/y2vvpsg9c2rq0mrgmc1s6dq64376k8lp-pi-coding-agent-1.0.3/lib/node_modules/pi-monorepo/node_modules/@earendil-works/pi-agent-core/dist/index.d.ts"]
+    }
+  },
+  "files": ["index.ts"]
+}

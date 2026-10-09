@@ -1,0 +1,172 @@
+--- a/packages/coding-agent/src/extensions/mcp/index.ts
++++ b/packages/coding-agent/src/extensions/mcp/index.ts
+@@ -367,6 +367,8 @@
+ 
+ 		const registerTools = (connection: McpServerConnection) => {
+ 			const server = connection.entry.name;
++			// Withdrawn/replaced connections cannot publish late tool definitions.
++			if (!sessionActive || findServer(server)?.connection !== connection) return;
+ 			const entry = findServer(server)?.entry ?? connection.entry;
+ 			const description = entry.config.description?.trim();
+ 			const namespace = {
+@@ -508,6 +510,7 @@
+ 			return url && credentials ? JSON.stringify(credentials.tokens(connection.name, url) ?? null) : "null";
+ 		};
+ 		const onConnectionChange = (connection: McpServerConnection) => {
++			if (findServer(connection.name)?.connection !== connection) return;
+ 			if (connection.state !== "needs-auth") tokensAtSignIn.delete(connection);
+ 			else if (!tokensAtSignIn.has(connection)) tokensAtSignIn.set(connection, storedTokens(connection));
+ 			emitChange();
+@@ -522,8 +525,13 @@
+ 		};
+ 
+ 		/** Create the server's connection, loading the MCP runtime on first use. */
+-		const createConnection = async (server: McpServer): Promise<McpServerConnection> => {
++		const createConnection = async (
++			server: McpServer,
++			isCurrent: () => boolean,
++		): Promise<McpServerConnection | undefined> => {
+ 			const runtime = await loadMcpRuntime();
++			// The server may have been unregistered during the lazy import.
++			if (!isCurrent()) return undefined;
+ 			const connection = new runtime.McpServerConnection({
+ 				entry: server.entry,
+ 				cwd: sessionCwd,
+@@ -549,11 +557,16 @@
+ 			isCurrent: () => boolean,
+ 			after?: Promise<unknown>,
+ 		): Promise<void> => {
++			const stillCurrent = () => isCurrent() && sessionActive && servers.includes(server) && isEnabled(server);
+ 			const ready = (async () => {
+ 				await after;
+-				if (!isCurrent()) return;
+-				const connection = await createConnection(server);
+-				if (!isCurrent()) return;
++				if (!stillCurrent()) return;
++				const connection = await createConnection(server, stillCurrent);
++				if (!connection) return;
++				if (!stillCurrent()) {
++					await connection.close();
++					return;
++				}
+ 				await connection.getClient().catch(() => undefined);
+ 			})();
+ 			server.ready = ready.catch(() => undefined);
+--- a/packages/coding-agent/src/extensions/mcp/runtime.ts
++++ b/packages/coding-agent/src/extensions/mcp/runtime.ts
+@@ -170,6 +170,10 @@
+ 	challenge: OAuthChallenge | undefined;
+ 	private client: McpClient | undefined;
+ 	private opening: Promise<McpClient> | undefined;
++	private pendingConnection: { client: McpClient; transport?: McpTransport; attached: boolean } | undefined;
++	private closing: Promise<void> | undefined;
++	private readonly clientClosures = new WeakMap<McpClient, Promise<void>>();
++	private readonly inflightClosures = new Set<Promise<void>>();
+ 	private closed = false;
+ 	/** Stderr of the last stdio server that failed to connect. */
+ 	private stderrTail: string | undefined;
+@@ -336,6 +340,7 @@
+ 	}
+ 
+ 	private markNeedsAuth(): void {
++		if (this.closed) return;
+ 		this.state = "needs-auth";
+ 		this.error = undefined;
+ 		this.changed();
+@@ -347,7 +352,20 @@
+ 
+ 	private async dropClient(client: McpClient): Promise<void> {
+ 		if (this.client === client) this.client = undefined;
+-		await client.close().catch(() => undefined);
++		await this.closeClient(client);
++	}
++
++	/** Share teardown by client identity; a stale close never detaches a replacement. */
++	private closeClient(client: McpClient): Promise<void> {
++		let closing = this.clientClosures.get(client);
++		if (!closing) {
++			closing = client.close().catch(() => undefined);
++			this.clientClosures.set(client, closing);
++			this.inflightClosures.add(closing);
++			const finished = closing;
++			void finished.then(() => this.inflightClosures.delete(finished));
++		}
++		return closing;
+ 	}
+ 
+ 	private async open(): Promise<McpClient> {
+@@ -376,12 +394,19 @@
+ 			requestTimeoutMs: this.timeoutMs,
+ 			roots: [{ uri: pathToFileURL(this.cwd).href, name: basename(this.cwd) }],
+ 		});
++		const attempt: NonNullable<McpServerConnection["pendingConnection"]> = { client, attached: false };
++		this.pendingConnection = attempt;
+ 		const log = this.log;
+ 		if (log) client.onNotification("notifications/message", (params) => log.write(this.entry.name, params));
+ 		let transport: McpTransport | undefined;
+ 		try {
++			if (this.closed || this.pendingConnection !== attempt) throw new Error("shut down while connecting");
+ 			transport = this.createTransport(this.entry, this.cwd, this.authProvider);
++			attempt.transport = transport;
++			if (this.closed || this.pendingConnection !== attempt) throw new Error("shut down while connecting");
++			attempt.attached = true;
+ 			await client.connect(transport);
++			if (this.closed || this.pendingConnection !== attempt) throw new Error("shut down while connecting");
+ 			client.onNotification("notifications/tools/list_changed", () => {
+ 				void this.refreshTools(client);
+ 			});
+@@ -396,7 +421,7 @@
+ 				client.serverCapabilities?.tools ? client.listTools() : [],
+ 				hasResources ? fetchResources(client) : { resources: [], resourceTemplates: [] },
+ 			]);
+-			if (this.closed) throw new Error("shut down while connecting");
++			if (this.closed || this.pendingConnection !== attempt) throw new Error("shut down while connecting");
+ 			if (client.connectionState !== "connected") throw new Error("connection closed during setup");
+ 			this.client = client;
+ 			this.tools = tools;
+@@ -410,11 +435,14 @@
+ 			this.changed();
+ 			return client;
+ 		} catch (error) {
+-			await client.close().catch(() => undefined);
++			if (!attempt.attached) await transport?.close().catch(() => undefined);
++			await this.closeClient(client);
+ 			if (transport instanceof StdioTransport) {
+ 				this.stderrTail = transport.stderr.trim().slice(-STDERR_TAIL_CHARS) || undefined;
+ 			}
+ 			throw error;
++		} finally {
++			if (this.pendingConnection === attempt) this.pendingConnection = undefined;
+ 		}
+ 	}
+ 
+@@ -461,14 +489,23 @@
+ 	}
+ 
+ 	async close(): Promise<void> {
++		if (this.closing) return this.closing;
+ 		this.closed = true;
+ 		this.state = "closed";
+-		this.changed();
+-		const client = this.client;
++		const pending = this.pendingConnection;
++		const clients = new Set([this.client, pending?.client]);
+ 		this.client = undefined;
+-		await client?.close().catch(() => undefined);
+-		// A refresh the server already answered may have rotated the refresh token; exiting before the
+-		// new tokens are saved would lose the grant.
+-		await this.authProvider?.settled();
++		this.pendingConnection = undefined;
++		// Do not await opening: initialize/tools/list can be blocked until we close its client.
++		this.closing = Promise.all([
++			...this.inflightClosures,
++			...Array.from(clients, (client) => client ? this.closeClient(client) : undefined),
++			pending && !pending.attached ? pending.transport?.close().catch(() => undefined) : undefined,
++		]).then(async () => {
++			// Preserve OAuth refresh-token writes, independently of the cancelled opening.
++			await this.authProvider?.settled();
++		});
++		this.changed();
++		return this.closing;
+ 	}
+ }

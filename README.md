@@ -4,6 +4,38 @@
 
 该模块还导入 `../cc-connect.nix`，因此同一代 Home Manager 配置会安装并启用 `cc-connect` 用户服务。
 
+## REA 模式（显式会话开关）
+
+当前 Pi 1.0.3 通过 `rea.nix` 声明式集成固定 REA 6.1.0
+（`morluto/rea` commit `2bf3663f654386c9fd8c1437c49659df97bd4697`）。
+REA 及引擎路径是扩展的私有依赖，不加入普通 Pi 的 PATH；不运行
+`rea setup`，不改全局 AGENTS、skills、mcp.json 或模型设置。
+
+- `/rea on`：仅父交互式 TUI 可用，还需用户确认。确认后才启动原生 MCP，
+  暴露 138 个 `mcp__rea__*` 工具并注入本次会话的 Evidence/Unknown 指导。
+- `/rea off`：撤销授权与工具可达性；保留旧对话历史，不声称撤销已经发生的目标修改。
+- `/rea status`：只显示 UI 状态，不向模型追加消息。
+- 每个新建、恢复、fork、clone、reload 的会话都默认 off；没有持久化 on、
+  启用环境变量、模型可调用的开启工具或自动识别逆向任务。
+- SDK 子代理和 Fusion child 不继承授权；从开启的父会话复制 prompt 时只移除
+  REA 专属指导，保留正常指令和历史事实。未开启父会话的原行为保持不变。
+- request timeout 为 600 秒以容纳 Ghidra 导入；MCP 工具就绪等待最多 30 秒。
+
+引擎使用私有 Ghidra/JDK 21/Chromium 路径。Pi 的 native MCP source patch
+仅修复注销、启动中取消、迟到发布和同名连接替换；编译后有真实 stdio
+进程回归 gate。新会话 off 的完整 prompt/tool schema/首个模型请求与未加载
+控制器时相等也有组合 gate。
+
+测试入口：`tests/rea-mode.test.mjs`、`rea-installed-neutrality.mjs`、
+`rea-child-prompts.test.mjs`、`rea-installed-active.mjs`、`rea-live.mjs`。
+它们使用无网络假模型；REA/Ghidra/浏览器/PTy 验收使用真实本地工具。
+
+这不是 OS 沙箱：原有 bash 仍有当前用户权限。未配置的 Hopper/IDA/JADX/
+Binwalk/Unblob/Wakaru 等可选引擎不被自动安装。
+
+> 下方部分较早版本说明仍保留；当前默认模型、扩展和技能落点以实际 Nix
+> 声明与部署配置为准，不以旧 README 表格作为环境基线。
+
 ## 默认行为
 
 `pi.nix` 通过 nixpkgs overlay 给 `pi-coding-agent` 应用本目录的补丁，并声明配置文件、扩展、agents、skills 和运行时依赖。当前实际设置为：

@@ -63,12 +63,15 @@ import type { Model } from "@earendil-works/pi-ai";
 import {
   buildSessionContext,
   createAgentSession,
+  DefaultResourceLoader,
+  getAgentDir,
   type ExtensionContext,
   SessionManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { runInChildSessionContext } from "./child-context.js";
 import { agentMentionReminder } from "./mention.js";
+import { sanitizeReaParentPrompt } from "./rea-inheritance.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
 
 export interface MentionCloneOptions {
@@ -136,12 +139,40 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
     // the settings level instead, which is what a session that never ran
     // `/think` is on anyway. Same shim shape as `modelRuntime` below.
     const thinkingLevel = (ctx as { thinkingLevel?: ThinkingLevel }).thinkingLevel;
-    const created = await runInChildSessionContext(() =>
-      createAgentSession({
+    const originalParentPrompt = ctx.getSystemPrompt?.();
+    const sanitizedParentPrompt = originalParentPrompt === undefined
+      ? undefined : sanitizeReaParentPrompt(originalParentPrompt);
+    const reaParent = sanitizedParentPrompt !== originalParentPrompt;
+    const created = await runInChildSessionContext(async () => {
+      let sanitizedResourceLoader: DefaultResourceLoader | undefined;
+      let authoritativeSessionManager: SessionManager | undefined;
+      if (reaParent) {
+        // Only the explicit REA branch changes the SDK restoration path.
+        // Current Pi rebuilds requests from its loader and SessionManager.
+        // Parent system records also carry sections/tool declarations/deltas;
+        // do not replay them over the sanitized child baseline. All non-system
+        // facts (including user text and projected summaries) stay verbatim.
+        authoritativeSessionManager = SessionManager.inMemory(ctx.cwd);
+        for (const message of conversation.messages) {
+          if (message.role === "system") continue;
+          authoritativeSessionManager.appendMessage(message as Parameters<SessionManager["appendMessage"]>[0]);
+        }
+        sanitizedResourceLoader = new DefaultResourceLoader({
+          cwd: ctx.cwd,
+          agentDir: getAgentDir(),
+          noContextFiles: true,
+          noSkills: true,
+          systemPromptOverride: () => sanitizedParentPrompt,
+          appendSystemPromptOverride: () => [],
+        });
+        await sanitizedResourceLoader.reload();
+      }
+      return createAgentSession({
         cwd: ctx.cwd,
+        ...(sanitizedResourceLoader && { resourceLoader: sanitizedResourceLoader }),
         // Nothing about the copy is worth persisting, and an in-memory manager
         // is also what keeps the real session untouched.
-        sessionManager: SessionManager.inMemory(ctx.cwd),
+        sessionManager: authoritativeSessionManager ?? SessionManager.inMemory(ctx.cwd),
         model: ctx.model as Model<never> | undefined,
         ...(thinkingLevel && { thinkingLevel }),
         modelRegistry: ctx.modelRegistry,
@@ -156,21 +187,19 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
         // agent-runner's `tools: sessionTools` beside its nested `customTools`.
         tools: [cloneAgentTool.name],
         customTools: [cloneAgentTool],
-      } as Parameters<typeof createAgentSession>[0]),
+      } as Parameters<typeof createAgentSession>[0]);
+    },
       { allowedTools: [cloneAgentTool.name] },
     );
     session = created.session;
 
-    // The clone rebuilds a system prompt from cwd and agentDir, which is close
-    // but not the live one — extensions contribute to it per turn. Copy the
-    // real thing, so the copy reasons under the instructions the user's model
-    // is actually working under.
-    const systemPrompt = ctx.getSystemPrompt?.();
-    if (systemPrompt) session.agent.state.systemPrompt = systemPrompt;
-
-    // The conversation itself. Pushed rather than assigned so the array the
-    // session was built around stays the one it goes on using.
-    session.agent.state.messages.push(...conversation.messages);
+    if (!reaParent) {
+      // Preserve the original cold clone, including its transient SDK state
+      // assignment/push semantics. Fixing that behavior is not an REA change.
+      const systemPrompt = ctx.getSystemPrompt?.();
+      if (systemPrompt) session.agent.state.systemPrompt = systemPrompt;
+      session.agent.state.messages.push(...conversation.messages);
+    }
 
     // User text first, reminder after — the order Claude Code's attachment
     // renderer produces, where the reminder trails the message it is about.

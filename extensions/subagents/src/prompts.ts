@@ -3,6 +3,7 @@
  */
 
 import type { AgentConfig, EnvInfo } from "./types.js";
+import { sanitizeReaParentPrompt } from "./rea-inheritance.js";
 
 /** Extra sections to inject into the system prompt (memory, skills, etc.). */
 export interface PromptExtras {
@@ -39,14 +40,14 @@ export interface PromptExtras {
  * Build the system prompt for an agent from its config.
  *
  * - "replace" mode: env header + config.systemPrompt (full control, no parent identity)
- * - "append" mode: parent system prompt + sub-agent context + env header + config.systemPrompt
- * - "append" with empty systemPrompt: pure parent clone
+ * - "append" mode: inherited prompt (minus session-local REA) + sub-agent context + env header + config.systemPrompt
+ * - "append" with empty systemPrompt: parent identity clone, not REA authorization
  *
  * Both modes include an `<active_agent name="${config.name}"/>` tag so downstream
  * extensions (e.g. permission/policy systems) can resolve per-agent policy
  * inside the child session by parsing the system prompt. In replace mode the tag
  * is prepended; in append mode it follows the shared inherited content so the
- * parent prompt forms an identical, cacheable byte prefix with the parent
+ * cold parent prompt forms an identical, cacheable byte prefix with the parent
  * session (the LLM's KV cache can then reuse those tokens across every spawn).
  *
  * @param parentSystemPrompt  The parent agent's effective system prompt (for append mode).
@@ -105,7 +106,7 @@ Your final message is the workflow return value. Return only the requested answe
   const extrasSuffix = extraSections.length > 0 ? "\n\n" + extraSections.join("\n") : "";
 
   if (config.promptMode === "append") {
-    const identity = parentSystemPrompt || genericBase;
+    const identity = parentSystemPrompt ? sanitizeReaParentPrompt(parentSystemPrompt) : genericBase;
 
     const bridge = `<sub_agent_context>
 Complete the assigned task. Use read/edit/write for files and find/grep for searches; reference absolute paths.
@@ -116,9 +117,9 @@ Complete the assigned task. Use read/edit/write for files and find/grep for sear
       : "";
 
     // Place shared/stable content first so the LLM's KV cache can reuse the
-    // inherited prefix across all subagent invocations. The parent prompt is
-    // placed verbatim (no wrapper tag) so it forms an identical byte prefix
-    // with the parent session, maximising KV cache hits. The <active_agent>
+    // inherited prefix across all subagent invocations. Except for explicit
+    // session-local REA authorization, the parent prompt is placed verbatim
+    // (no wrapper tag), maximising KV cache hits. The <active_agent>
     // tag and env block vary per call and are placed after the cached prefix.
     return identity + "\n\n" + bridge + "\n\n" + activeAgentTag + envBlock + worktreeBlock + workflowBlock + customSection + resultContract + extrasSuffix;
   }

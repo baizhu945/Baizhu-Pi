@@ -4,6 +4,7 @@
   imports = [
     ./extensions.nix
     ./skills.nix
+    ./rea.nix
   ];
 
   programs.pi-coding-agent = {

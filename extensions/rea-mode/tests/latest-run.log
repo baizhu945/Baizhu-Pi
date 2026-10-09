@@ -1,0 +1,16 @@
+✔ lazy import unregister: no late connection, tools or subprocess; cold-off does not import (1.712901ms)
+✔ tools/list pending: concurrent close cancels setup, suppresses late publish, closes once (2.663044ms)
+✔ concurrent reconnects share replacement; old client close does not close the new client (0.828132ms)
+✔ terminal close waits detached old teardown; concurrent reconnect cannot reopen (0.616564ms)
+✔ factory reentrant close: unbound pending transport is closed, never started (0.476439ms)
+✔ real SDK unregister during initialize: stdin closes, SIGTERM received, process exits; fresh session has zero tools (710.215753ms)
+✔ real SDK unregister during tools/list: stdin closes, SIGTERM received, process exits; fresh session has zero tools (587.553397ms)
+✔ real SDK same-name replacement: cancelled list cannot publish or kill replacement process (1089.476928ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2907.142956

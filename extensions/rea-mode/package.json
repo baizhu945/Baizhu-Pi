@@ -1,0 +1,18 @@
+{
+  "name": "pi-rea-mode",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Opt-in, TUI-confirmed REA controller using Pi's native MCP support",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./index.ts"],
+    "skills": [],
+    "prompts": [],
+    "themes": []
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-agent-core": "*"
+  }
+}

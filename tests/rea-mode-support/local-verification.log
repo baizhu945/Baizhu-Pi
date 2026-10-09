@@ -1,0 +1,20 @@
+✔ cold controller OFF equals absent: full prompt, definitions, namespace, registry, callable tools and actual request (196.251946ms)
+✔ print/json/RPC and rejected TUI confirmation do not spawn or alter tools (123.62896ms)
+✔ confirmed native stdio MCP is direct/ready; real readonly calls retain structuredContent; OFF revokes direct/nested calls (103.523891ms)
+✔ startup crash and wrong expected catalog fail closed, never ready (2787.951818ms)
+✔ OFF while confirm is pending invalidates consent epoch; repeated ON cannot start duplicate processes (132.576559ms)
+✔ OFF during connecting waits/rejects safely; late startup cannot re-expose tools (226.88822ms)
+✔ late native MCP tools are direct while ON and hidden after OFF (209.067057ms)
+✔ reload/new/fork/resume never inherit ON, including persisted tool loadout and spoofed markers (267.45342ms)
+✔ environment and SDK child/Fusion markers never auto-enable a controller (74.45005ms)
+✔ existing real Fusion/ask-user/web extensions remain unchanged and do not authorize REA (290.447037ms)
+﹣ optional actual REA executable: confirmed 134-tool direct catalog and OFF (0.035541ms) # No optional reaExecutable supplied
+REA loader/SDK/native-MCP tests completed with capture/no-op model streams; zero paid requests.
+ℹ tests 11
+ℹ suites 0
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 0
+ℹ duration_ms 4421.723425
