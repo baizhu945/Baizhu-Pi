@@ -1,0 +1,5 @@
+{"event":"spawn","pid":1161924}
+{"event":"initialize","pid":1161924}
+{"event":"tools/list","pid":1161924}
+{"event":"stdin-end","pid":1161924}
+{"event":"SIGTERM","pid":1161924}

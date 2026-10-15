@@ -32,7 +32,7 @@ for (const budget of [100, 60000]) {
   transport.stderr?.on('data', () => {});
   try {
     await client.connect(transport, { timeout: 30000 });
-    const call = (name, args = {}) => client.callTool({ name, arguments: args }, { timeout: 90000 });
+    const call = (name, args = {}) => client.callTool({ name, arguments: args }, undefined, { timeout: 90000 });
     const opened = await call('open_binary', { path: binary });
     assert.notEqual(opened.isError, true);
     const start = Date.now();
@@ -45,8 +45,8 @@ for (const budget of [100, 60000]) {
       assert(Date.now() - start < 5000, 'short internal deadline accidentally fell back to 330s');
     } else {
       assert.notEqual(result.isError, true, JSON.stringify(data));
-      assert.equal(data.evidence.provider.id, 'ghidra');
-      assert(data.result.includes('7'));
+      assert.equal(data.provider.id, 'ghidra');
+      assert(data.normalized_result.includes('7'));
     }
     report.cases.push({ budget_ms: budget, duration_ms: Date.now() - start, outcome: budget === 100 ? 'provider_timeout' : 'real-decompilation' });
     await call('close_binary');

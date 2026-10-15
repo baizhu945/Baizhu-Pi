@@ -4,7 +4,12 @@ import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
-const sdk = resolve(process.argv[2] ?? '/nix/store/y2vvpsg9c2rq0mrgmc1s6dq64376k8lp-pi-coding-agent-1.0.3/lib/node_modules/pi-monorepo');
+if (!process.argv[2]) throw new Error('Usage: node tests/run.mjs <matching Pi SDK root> --built');
+const sdk = resolve(process.argv[2]);
+const { version } = JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8'));
+if (!process.argv.includes('--built') && version !== '1.0.3') {
+  throw new Error(`Pi ${version}: the legacy dist patch only supports 1.0.3; use the source-patched SDK with --built`);
+}
 await mkdir(join(here, '.runs'), { recursive: true });
 const work = await mkdtemp(join(here, '.runs/native-mcp-'));
 const copy = join(work, 'sdk');
@@ -18,13 +23,13 @@ if (!process.argv.includes('--built')) {
   const apply = spawnSync('patch', ['-p1', '-d', copy, '-i', join(root, 'native-mcp-hardening.patch')], { encoding: 'utf8' });
   if (apply.status !== 0) throw new Error(apply.stdout + apply.stderr);
 } else {
-  console.log('Testing an already-built source-patched SDK; no dist patch applied.');
+  console.log(`Testing Pi ${version} compiled SDK; no dist patch applied.`);
 }
 // TEST-ONLY deferred lazy import; no hook is added to the production patch.
 const lazy = join(copy, 'dist/extensions/mcp/runtime.lazy.js');
 await chmod(lazy, 0o644);
 const old = await readFile(lazy, 'utf8');
-if (!old.includes('export const loadMcpRuntime = () => import("./runtime.js");')) throw new Error('Unexpected 1.0.3 lazy module');
+if (!old.includes('export const loadMcpRuntime = () => import("./runtime.js");')) throw new Error(`Unexpected Pi ${version} lazy module`);
 await writeFile(lazy, old.replace('export const loadMcpRuntime = () => import("./runtime.js");',
   'export const loadMcpRuntime = async () => { const gate = globalThis[Symbol.for("rea-tests:lazy-gate")]; if (gate) { gate.enter(); await gate.wait; } return import("./runtime.js"); };'));
 const result = spawnSync(process.execPath, ['--test', '--test-reporter=spec', '--test-concurrency=1', join(here, 'native-mcp.test.mjs')], {

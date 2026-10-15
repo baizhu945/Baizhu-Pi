@@ -1,25 +1,20 @@
-# Native MCP 1.0.3 hardening regressions
+# Native MCP 1.1.0 hardening regressions
 
 No paid model: **no session.prompt(), provider request, API key, REA backend or Ghidra is used**. Tests use the official SDK/MCP classes, in-memory protocol transports, and actual local Node stdio subprocesses. Only the lazy-import test uses a TEST-ONLY deferred import in a temporary SDK copy; this hook is not in either production patch.
 
 ## Reproduce locally
 
-From a writable copy of the extension:
+The source patch is rebased onto Pi 1.1.0's AbortController-based connection/session implementation, preserving upstream attempt-ownership checks. The old `build-patches.mjs`, `check-source.mjs` and `native-mcp-hardening.patch` are **1.0.3 diagnostic helpers**, not the current deployment path. Do not use the old generator to overwrite the migrated source patch or apply the old dist patch to newer Pi versions.
 
-```sh
-node tests/build-patches.mjs /nix/store/ybsnz4v6fzl73dx2alwimf9518cry6ny-source /path/to/pi-monorepo
-node tests/run.mjs /path/to/UNPATCHED/pi-monorepo
-```
-
-The generator verifies every replacement uniquely matches the exact upstream input, emits both source and dist patches, and never changes installed files. run.mjs copies `dist/` and `package.json` under `tests/.runs`, symlinks the installed dependency tree read-only, applies the dist patch **only to that copy**, then runs eight independent Node tests. `latest-run.log` is the last real execution output. `.runs/` and `.generated/` are disposable, do not deploy them with Home Manager.
-
-For the Pi package rebuilt by the main agent from the **source patch**:
+From a writable copy of the extension, test the Pi 1.1.0 package rebuilt from the **source patch**:
 
 ```sh
 node tests/run.mjs /path/to/SOURCE-PATCHED/pi-monorepo --built
 ```
 
-`--built` skips applying the dist patch, so the tests validate the actual compiled source result. It still makes a writable SDK copy for the test-only lazy-import gate. In Nix installCheck, copy this extension/tests/patches into a writable temporary directory first (`chmod -R u+w`), then run with `$out`'s SDK root. No package-manager dependency installation is required; Node and `patch` suffice.
+`--built` skips applying the dist patch, so the tests validate the actual compiled source result. It copies `dist/` and `package.json` under `tests/.runs`, symlinks the installed dependency tree read-only, then inserts the test-only lazy-import gate in that writable copy. The matching SDK path is required explicitly; there is no hardcoded old-store default. The runner reports the actual SDK version and refuses the legacy dist patch for versions other than 1.0.3. `latest-run.log` records the last local execution; `.runs/` and `.generated/` are disposable and must not be deployed.
+
+Home Manager automatically runs all eight tests with `--built` in Pi's installCheck, against `$out`'s SDK root. It also checks the controller with the actual 138-tool REA backend and the complete declared extension composition. No package-manager dependency installation or paid model request is required.
 
 ## Assertions
 
@@ -36,6 +31,6 @@ The gated fixture deliberately remains alive after stdin EOF so SIGTERM/process-
 
 ## Source typing / limitations
 
-After `build-patches.mjs` generates `tests/.generated/`, `node tests/check-source.mjs [sourceRoot] [sdkRoot] [tsc]` compares strict TypeScript diagnostics on patched vs exact unpatched upstream dependency graphs. The installed runtime SDK lacks upstream dev declaration packages (proper-lockfile/semver/cross-spawn/etc.), so this local check reported **identical pre-existing diagnostics, no added patch diagnostics**, not a complete source-build success. The main agent must still run Nix's full upstream build and then `run.mjs ... --built`.
+The historical 1.0.3 `check-source.mjs` only compared diagnostics using installed runtime dependencies, which lack upstream dev declarations. That was not a complete source-build success. The 1.0.4 full Nix upstream TypeScript/bundle build and all eight compiled-result regressions passed. For each upgrade, Home Manager again requires the full build and compiled-result tests. The unpatched 1.1.0 negative control passes six tests (including the now-upstream lazy-import cancellation fix), but still fails detached teardown waiting and unattached transport cleanup. Simply removing the entire source patch is therefore insufficient.
 
 The source patch changes only `packages/coding-agent/src/extensions/mcp/{index,runtime}.ts`; apply it before Pi's TS/bundle compilation. The dist patch is a diagnostic/testing companion, not the deployment solution. Controller `index.ts`/config timeout/watch logic has NOT been shortened by this follow-up. With the source hardening deployed, correctness of late-registration suppression no longer depends on waiting 600 seconds: the native server/connection identities and pending-client cancellation enforce it. A 31-second controller cleanup safety window is conservative for the ordinary native stdio 0.5s+2s termination sequence, but its use should follow the main agent's source rebuild and compiled-result regression run. No finite watcher can prove physical exit of an uninterruptible OS process or a malicious custom transport; public unregister remains void.

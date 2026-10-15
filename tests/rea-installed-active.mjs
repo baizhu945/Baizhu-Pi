@@ -107,30 +107,40 @@ try {
   await session.prompt("/rea on");
   assert.equal(requests.length, 1, "Enabling must not itself invoke a model");
   assert.equal(ui.confirmations, 1);
-  assert.equal(session.getActiveToolNames().filter(name => name.startsWith("mcp__rea__")).length, 138);
+  assert.equal(session.getActiveToolNames().filter(name => name.startsWith("mcp__rea__")).length, 187);
   assert.deepEqual(session.getActiveToolNames().filter(name => !name.startsWith("mcp__rea__")), baseline);
-  assert.equal(session.getActiveToolNames().length, baseline.length + 138);
-  report.checks.push("user-confirmed 138 tools; original loadout retained");
+  assert.equal(session.getActiveToolNames().length, baseline.length + 187);
+  report.checks.push("user-confirmed 187 tools; original loadout retained");
   const status = await call("binary_session");
-  assert.equal(status.result.tool_availability.length, 138);
+  const availableNames = status.result.tool_availability.groups.flatMap(group => group.names);
+  assert.equal(availableNames.length, 187);
+  assert.equal(new Set(availableNames).size, 187);
   assert.match(JSON.stringify(requests.at(-1)), /REA mode is explicitly authorized/,
     "REA guidance must reach the actual model request (it is request-local, not the idle prompt getter)");
   const app = path.join(root, "application"); mkdirSync(app);
   writeFileSync(path.join(app, "package.json"), '{"name":"pi-live-rea","version":"1.0.0","main":"main.cjs"}');
   writeFileSync(path.join(app, "main.cjs"), 'const {ipcMain}=require("electron");ipcMain.handle("pi-rea:local",(_,value)=>({value}));');
-  const graph = await call("analyze_javascript_application", { input_path: app, format: "directory" });
-  assert.equal(graph.evidence.provider.id, "rea-javascript-application");
-  assert(graph.result.graph.nodes.length > 0 && graph.result.graph.edges.length > 0);
-  assert(JSON.stringify(graph.result).includes("pi-rea:local"));
-  report.javascript_evidence = graph.evidence.evidence_id;
+  const graph = await call("analyze_javascript_application", { input_path: app, format: "directory", detail: "complete" });
+  assert.equal(graph.provider.id, "rea-javascript-application");
+  assert(graph.normalized_result.graph.nodes.length > 0 && graph.normalized_result.graph.edges.length > 0);
+  assert(JSON.stringify(graph.normalized_result).includes("pi-rea:local"));
+  report.javascript_evidence = graph.evidence_id;
   report.checks.push("real JS application analysis through native Pi tool pipeline");
   const evmCarrier = path.join(root, "runtime.hex");
   writeFileSync(evmCarrier, '0x60006000f3\n');
-  const evm = await call("inspect_evm_interface", { path: evmCarrier, encoding: "hex" });
-  assert.equal(evm.result.bytecode.hex, "60006000f3");
-  assert.equal(evm.result.runtime_execution, "not-performed");
-  assert.equal(evm.result.evidence_kind, "inferred");
-  report.checks.push("new offline EVMole inspection through native Pi pipeline without chain access or target execution");
+  const evm = await call("inspect_evm_interface", { path: evmCarrier, encoding: "hex", detail: "complete" });
+  assert.equal(evm.normalized_result.bytecode.hex, "60006000f3");
+  assert.equal(evm.normalized_result.runtime_execution, "not-performed");
+  assert.equal(evm.normalized_result.evidence_kind, "inferred");
+  const compact = await call("inspect_evm_interface", { path: evmCarrier, encoding: "hex", detail: "summary" });
+  const summary = compact.normalized_result;
+  assert.equal(summary.parent_operation, "inspect_evm_interface");
+  const page = await call("inspect_analysis_view", {
+    source: { kind: "retained-evidence", evidence_id: summary.parent_evidence_id },
+    view: { kind: "evm", facet: "bytecode_hex", offset: 2, limit: 4 },
+  });
+  assert.deepEqual(page.normalized_result.item, { text: "0060", unit: "utf16-code-units" });
+  report.checks.push("offline EVMole and new retained-Evidence paging through native Pi pipeline without chain access or execution");
   const source = path.join(root, "native.c"), binary = path.join(root, "native");
   writeFileSync(source, '#include <stdio.h>\n__attribute__((noinline)) int pi_rea_leaf(int x){return x*3+7;}\n__attribute__((noinline)) int pi_rea_entry(int x){puts("PI_REA_PIPELINE_OK");return x>3?pi_rea_leaf(x):pi_rea_leaf(x+1)+2;}\nint main(int argc,char**argv){return pi_rea_entry(argc);}\n');
   execFileSync("/run/current-system/sw/bin/gcc", ["-O0", "-g", "-fno-inline", "-fno-pie", "-no-pie", source, "-o", binary]);
@@ -138,14 +148,14 @@ try {
   // Omitting provider_id must honor the configured native Ghidra default.
   await call("open_binary", { path: binary });
   const dossier = await call("analyze_function", { procedure: "pi_rea_entry" });
-  assert.equal(dossier.evidence.provider.id, "ghidra");
-  assert.equal(dossier.evidence.subject.digest.sha256, originalSha);
-  assert(dossier.evidence.analysis_profile);
-  assert(dossier.result.assembly.length > 0 && dossier.result.basic_blocks.length > 1);
-  assert(dossier.result.pseudocode.length > 0);
-  assert(JSON.stringify(dossier.result.callees).includes("pi_rea_leaf"));
-  report.ghidra_evidence = dossier.evidence.evidence_id;
-  report.ghidra_profile = dossier.evidence.analysis_profile;
+  assert.equal(dossier.provider.id, "ghidra");
+  assert.equal(dossier.subject.digest.sha256, originalSha);
+  assert(dossier.analysis_profile);
+  assert(dossier.normalized_result.assembly.length > 0 && dossier.normalized_result.basic_blocks.length > 1);
+  assert(dossier.normalized_result.pseudocode.length > 0);
+  assert(JSON.stringify(dossier.normalized_result.callees).includes("pi_rea_leaf"));
+  report.ghidra_evidence = dossier.evidence_id;
+  report.ghidra_profile = dossier.analysis_profile;
   report.checks.push("real Ghidra disassembly/decompilation/CFG/calls through native Pi tool pipeline");
   await call("close_binary");
   assert.equal(hash(binary), originalSha);
@@ -156,10 +166,10 @@ try {
     const started = Date.now();
     console.log(`[large Ghidra] first full import/analysis started: ${new Date(started).toISOString()}`);
     const matches = await call("search_strings", { pattern: "BrightnessContrast|brightnessContrast|Brightness/Contrast|useLegacy", mode: "regex" });
-    assert.equal(matches.evidence.provider.id, "ghidra");
-    assert.equal(matches.evidence.subject.digest.sha256, largeSha);
+    assert.equal(matches.provider.id, "ghidra");
+    assert.equal(matches.subject.digest.sha256, largeSha);
     report.large_target = { path: largeTarget, sha256: largeSha, duration_ms: Date.now() - started,
-      evidence_id: matches.evidence.evidence_id, provider: matches.evidence.provider };
+      evidence_id: matches.evidence_id, provider: matches.provider };
     await call("close_binary");
     assert.equal(hash(largeTarget), largeSha);
     assert(!readdirSync(tmp).some(name => name.startsWith("rea-ghidra-")));

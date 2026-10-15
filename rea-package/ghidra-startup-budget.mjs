@@ -1,13 +1,13 @@
-// Offline gate for upstream 6.1's native startup budget (no local source patch).
+// Offline gate for upstream 6.4's native startup budget (no local source patch).
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 const [root] = process.argv.slice(2);
 assert(root, 'usage: node ghidra-startup-budget.mjs <REA package runtime>');
 const load = name => import(pathToFileURL(path.join(root, 'dist', name)).href);
-const { parseConfig } = await load('config.js');
+const { parseConfig } = await load('config/parseConfig.js');
 const { createGhidraProviderClient } = await load('ghidra/GhidraProviderClient.js');
-const { DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS } = await load('config/ghidraStartupTimeout.js');
+const { DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS } = await load('config/providerStartupTimeout.js');
 const { GhidraClient } = await load('ghidra/GhidraClient.js');
 const { ProviderStartupDeadline } = await load('process/ProviderDeadline.js');
 const { silentLogger } = await load('logger.js');
@@ -15,7 +15,7 @@ assert.equal(DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS, 330000);
 const baseline = parseConfig({});
 assert.equal(baseline.ok, true);
 assert.equal(baseline.value.ghidraStartupTimeoutMs, 330000);
-for (const value of ['1', '330000', '1800000', '2147483647', '1e6', ' 1800000 ', '01', '+1']) {
+for (const value of ['1', '330000', '1800000', '2147483647']) {
   const parsed = parseConfig({ REA_GHIDRA_STARTUP_TIMEOUT_MS: value });
   assert.equal(parsed.ok, true, value);
   assert.equal(parsed.value.ghidraStartupTimeoutMs, Number(value));
@@ -23,11 +23,10 @@ for (const value of ['1', '330000', '1800000', '2147483647', '1e6', ' 1800000 ',
   const { ghidraStartupTimeoutMs: __, ...expected } = baseline.value;
   assert.deepEqual(rest, expected, 'no unrelated config changes');
 }
-// Upstream deliberately defaults invalid/unset input rather than failing startup.
-for (const value of ['', '0', '-1', '1.5', '2147483648', 'Infinity', 'not-a-number']) {
+// Upstream now rejects noncanonical or invalid values; only unset defaults.
+for (const value of ['', '0', '-1', '1.5', '1e6', ' 1800000 ', '01', '+1', '2147483648', 'Infinity', 'not-a-number']) {
   const parsed = parseConfig({ REA_GHIDRA_STARTUP_TIMEOUT_MS: value });
-  assert.equal(parsed.ok, true, value);
-  assert.equal(parsed.value.ghidraStartupTimeoutMs, 330000, value);
+  assert.equal(parsed.ok, false, value);
 }
 const target = { kind: 'executable', format: 'elf', path: '/fixture/never-launched', sha256: 'a'.repeat(64), architecture: 'x86_64' };
 const provider = { id: 'ghidra', name: 'Ghidra', version: '12.1.2' };
@@ -58,4 +57,4 @@ abort.abort('user cancellation');
 assert.equal(deadline.interruption, 'cancelled');
 assert.equal(await deadline.wait(1800000), 'aborted');
 deadline.dispose();
-console.log('PASS upstream Ghidra startup budget: default/fallback/timer bounds; config -> production client; real-client cancellation; no local patch');
+console.log('PASS upstream Ghidra startup budget: default/strict decimal/timer bounds; config -> production client; real-client cancellation; no local patch');

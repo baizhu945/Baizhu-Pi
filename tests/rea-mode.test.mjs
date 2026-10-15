@@ -452,13 +452,13 @@ try {
     await close(absent); await close(obj);
   });
 
-  await test('optional actual REA executable: confirmed 138-tool direct catalog and OFF', { skip: !reaExecutable && 'No optional reaExecutable supplied' }, async () => {
+  await test('optional actual REA executable: confirmed 187-tool direct catalog and OFF', { skip: !reaExecutable && 'No optional reaExecutable supplied' }, async () => {
     const installedConfig = JSON.parse(readFileSync(path.join(extensionDir, 'config.json'), 'utf8'));
-    const product = fixture({ config: { ...installedConfig, command: path.resolve(reaExecutable), expectedTools: 138 } });
+    const product = fixture({ config: { ...installedConfig, command: path.resolve(reaExecutable), expectedTools: 187 } });
     const obj = await create(product); const baseline = view(obj);
     assert.deepEqual(view(obj), baseline);
-    await on(obj, 138);
-    assert.equal(reaTools(obj).filter(t => t.exposure === 'direct').length, 138);
+    await on(obj, 187);
+    assert.equal(reaTools(obj).filter(t => t.exposure === 'direct').length, 187);
     await off(obj, baseline); await close(obj);
   });
   assert.deepEqual(errors, [], 'No swallowed extension errors');
