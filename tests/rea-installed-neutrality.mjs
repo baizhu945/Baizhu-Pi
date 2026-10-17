@@ -83,7 +83,10 @@ async function create(includeMode) {
 }
 const clean = value => JSON.parse(JSON.stringify(value, (key, child) => key === "timestamp" ? undefined : child));
 async function view({ session, resourceLoader }) {
-  const outcome = await session._extensionRunner.emitBeforeAgentStart("baseline input", undefined, session._baseSystemPromptOptions);
+  const outcome = await session._extensionRunner.emitBeforeAgentStart(
+    { messageType: "user", prompt: "baseline input" },
+    session._baseSystemPromptOptions,
+  );
   return clean({
     activeTools: session.agent.state.tools,
     allTools: session.getAllTools(),

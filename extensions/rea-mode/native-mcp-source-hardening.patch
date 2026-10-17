@@ -1,6 +1,6 @@
 --- a/packages/coding-agent/src/extensions/mcp/index.ts
 +++ b/packages/coding-agent/src/extensions/mcp/index.ts
-@@ -387,6 +387,8 @@
+@@ -386,6 +386,8 @@
  
  		const registerTools = (connection: McpServerConnection) => {
  			const server = connection.entry.name;
@@ -9,7 +9,7 @@
  			const entry = findServer(server)?.entry ?? connection.entry;
  			const description = entry.config.description?.trim();
  			const namespace = {
-@@ -542,6 +544,7 @@
+@@ -545,6 +547,7 @@
  			return url && credentials ? JSON.stringify(credentials.tokens(connection.name, url) ?? null) : "null";
  		};
  		const onConnectionChange = (connection: McpServerConnection) => {
@@ -17,7 +17,7 @@
  			if (connection.state !== "needs-auth") tokensAtSignIn.delete(connection);
  			else if (!tokensAtSignIn.has(connection)) tokensAtSignIn.set(connection, storedTokens(connection));
  			emitChange();
-@@ -597,7 +600,11 @@
+@@ -600,7 +603,11 @@
  				await after;
  				if (!isCurrent()) return;
  				const connection = await createConnection(server, isCurrent);
@@ -32,7 +32,7 @@
  			server.ready = ready.catch(() => undefined);
 --- a/packages/coding-agent/src/extensions/mcp/runtime.ts
 +++ b/packages/coding-agent/src/extensions/mcp/runtime.ts
-@@ -171,6 +171,10 @@
+@@ -152,6 +152,10 @@
  	challenge: OAuthChallenge | undefined;
  	private client: McpClient | undefined;
  	private opening: Promise<McpClient> | undefined;
@@ -43,7 +43,7 @@
  	/** Aborted by `close()`; cancels a connect in progress, including the wait between retries. */
  	private readonly shutdown = new AbortController();
  	/** Stderr of the last stdio server that failed to connect. */
-@@ -342,6 +346,7 @@
+@@ -323,6 +327,7 @@
  	}
  
  	private markNeedsAuth(): void {
@@ -51,7 +51,7 @@
  		this.state = "needs-auth";
  		this.error = undefined;
  		this.changed();
-@@ -353,7 +358,21 @@
+@@ -334,7 +339,21 @@
  
  	private async dropClient(client: McpClient): Promise<void> {
  		if (this.client === client) this.client = undefined;
@@ -74,7 +74,7 @@
  	}
  
  	private async open(): Promise<McpClient> {
-@@ -382,20 +401,22 @@
+@@ -363,20 +382,22 @@
  			requestTimeoutMs: this.timeoutMs,
  			roots: [{ uri: pathToFileURL(this.cwd).href, name: basename(this.cwd) }],
  		});
@@ -103,16 +103,16 @@
  			client.onNotification("notifications/tools/list_changed", () => {
  				void this.refreshTools(client);
  			});
-@@ -410,7 +431,7 @@
- 				client.serverCapabilities?.tools ? client.listTools() : [],
- 				hasResources ? fetchResources(client) : { resources: [], resourceTemplates: [] },
- 			]);
+@@ -384,7 +405,7 @@
+ 			client.onClose(() => this.handleClientClose(client, stdio));
+ 			// Servers without the tools capability (prompts or resources only) do not answer tools/list.
+ 			const tools = client.serverCapabilities?.tools ? await client.listTools() : [];
 -			if (this.closed) throw new Error("shut down while connecting");
 +			if (this.closed || this.pendingConnection !== attempt) throw new Error("shut down while connecting");
  			if (client.connectionState !== "connected") throw new Error("connection closed during setup");
  			this.client = client;
  			this.tools = tools;
-@@ -424,6 +445,8 @@
+@@ -396,6 +417,8 @@
  			this.changed();
  			return client;
  		} catch (error) {
@@ -121,7 +121,7 @@
  			await closeClient();
  			if (transport instanceof StdioTransport) {
  				this.stderrTail = transport.stderr.trim().slice(-STDERR_TAIL_CHARS) || undefined;
-@@ -431,6 +454,7 @@
+@@ -403,6 +426,7 @@
  			throw error;
  		} finally {
  			this.shutdown.signal.removeEventListener("abort", closeClient);
@@ -129,7 +129,7 @@
  		}
  	}
  
-@@ -478,14 +502,24 @@
+@@ -441,14 +465,24 @@
  
  	/** Resolves once no transport of this server is open, including one that was still connecting. */
  	async close(): Promise<void> {

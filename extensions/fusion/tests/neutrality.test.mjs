@@ -76,7 +76,10 @@ async function create(loadFusion, options = {}) {
   return { session, loader };
 }
 async function view({ session, loader }) {
-  const outcome = await session._extensionRunner.emitBeforeAgentStart('test input', undefined, session._baseSystemPromptOptions);
+  const outcome = await session._extensionRunner.emitBeforeAgentStart(
+    { messageType: 'user', prompt: 'test input' },
+    session._baseSystemPromptOptions,
+  );
   return {
     tools: session.agent.state.tools.map(({ name, description, parameters }) => ({ name, description, parameters })),
     prompt: buildSystemPrompt(outcome.systemPromptOptions),
