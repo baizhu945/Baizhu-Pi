@@ -7,9 +7,9 @@ independent recipe and helper files; neither configuration imports the other.
 
 ## Current pin
 
-REA **6.4.0**, GitHub checkpoint `a2d8b94dd50dab8d966239dd63ab84718aa8b4b4`.
-Source: `sha256-z9Hgl8LiXkgVmO8zyGOkXlLXPZM+jxFmeNDmHUfTJnw=`.
-Locked npm cache: `sha256-NNK1RLvEDF7Cj4BebTbEx5MNCEHZc2KQTmaoKmpAMYw=`.
+REA **6.7.0**, GitHub checkpoint `0c440bfc07f3cb343e2e836d27cccaed539cfe9c`.
+Source: `sha256-afd2BLZVThTeU+R8I+oeTh3q/6mO6sMkfJyuo5/inwM=`.
+Locked npm cache: `sha256-yWWKLAeHthuZcA6x84ME8SFjTVqAEtL+yX7G8QGj2II=`.
 Node24 private absolute executable; upstream lockfile unchanged.
 
 ## Patch review
@@ -45,7 +45,7 @@ or activated just because its operation appears in the187-tool catalog.
 
 ## Verification
 
-Both independent packages check real stdio **187 tools /6 prompts**, canonical
+Both independent packages check real stdio **210 tools /6 prompts**, canonical
 name/effects equality, strict startup parsing/client forwarding/cancellation,
 all full-profile input/output patterns with JS and Rust, and canonical/AJV
 Unicode/NUL/newline fixtures. SQLite smoke uses Node24.15+ DatabaseSync.limits,

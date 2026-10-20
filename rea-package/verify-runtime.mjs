@@ -37,7 +37,7 @@ const run = (args) => execute(cli, args, {
   maxBuffer: 8 * 1024 * 1024,
 });
 const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
-assert.equal(manifest.version, "6.4.0");
+assert.equal(manifest.version, "6.7.0");
 for (const file of [
   "dist/main.js", "dist/cli.js", "dist/mcp/main.js", "dist/cli-runtime/cli.js",
   "bridge/hopper_bridge.py", "bridge/ghidra/ReaGhidraBridge.java",
@@ -54,7 +54,7 @@ console.log("CLI version:", (await run(["--version"])).stdout.trim());
 assert.match((await run(["--help"])).stdout, /REA|rea/);
 const doctor = JSON.parse((await run(["mcp", "doctor", "--json"])).stdout);
 assert.equal(doctor.healthy, true, JSON.stringify(doctor));
-assert.equal(doctor.server.version, "6.4.0");
+assert.equal(doctor.server.version, "6.7.0");
 assert.equal(doctor.inventory.tools.observed, doctor.inventory.tools.expected);
 console.log("Production MCP doctor:", JSON.stringify(doctor));
 

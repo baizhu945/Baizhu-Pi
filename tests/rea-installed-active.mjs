@@ -107,14 +107,14 @@ try {
   await session.prompt("/rea on");
   assert.equal(requests.length, 1, "Enabling must not itself invoke a model");
   assert.equal(ui.confirmations, 1);
-  assert.equal(session.getActiveToolNames().filter(name => name.startsWith("mcp__rea__")).length, 187);
+  assert.equal(session.getActiveToolNames().filter(name => name.startsWith("mcp__rea__")).length, 210);
   assert.deepEqual(session.getActiveToolNames().filter(name => !name.startsWith("mcp__rea__")), baseline);
-  assert.equal(session.getActiveToolNames().length, baseline.length + 187);
-  report.checks.push("user-confirmed 187 tools; original loadout retained");
+  assert.equal(session.getActiveToolNames().length, baseline.length + 210);
+  report.checks.push("user-confirmed 210 tools; original loadout retained");
   const status = await call("binary_session");
   const availableNames = status.result.tool_availability.groups.flatMap(group => group.names);
-  assert.equal(availableNames.length, 187);
-  assert.equal(new Set(availableNames).size, 187);
+  assert.equal(availableNames.length, 210);
+  assert.equal(new Set(availableNames).size, 210);
   assert.match(JSON.stringify(requests.at(-1)), /REA mode is explicitly authorized/,
     "REA guidance must reach the actual model request (it is request-local, not the idle prompt getter)");
   const app = path.join(root, "application"); mkdirSync(app);

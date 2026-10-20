@@ -6,7 +6,7 @@ let
   rea = let
     inherit (pkgs) lib;
     nodejs = pkgs.nodejs_24;
-    revision = "a2d8b94dd50dab8d966239dd63ab84718aa8b4b4";
+    revision = "0c440bfc07f3cb343e2e836d27cccaed539cfe9c";
     packageChecks = pkgs.lib.cleanSourceWith {
       src = ./rea-package;
       filter = path: type: type == "directory" || builtins.elem (baseNameOf path) [
@@ -15,16 +15,16 @@ let
     };
   in pkgs.buildNpmPackage {
     pname = "rea-agents";
-    version = "6.4.0";
+    version = "6.7.0";
 
     src = pkgs.fetchzip {
       url = "https://github.com/morluto/rea/archive/${revision}.tar.gz";
-      hash = "sha256-z9Hgl8LiXkgVmO8zyGOkXlLXPZM+jxFmeNDmHUfTJnw=";
+      hash = "sha256-afd2BLZVThTeU+R8I+oeTh3q/6mO6sMkfJyuo5/inwM=";
     };
     # Ghidra budgets and portable schema patterns are supported upstream.
     # Keep compiled wire-schema regression checks rather than duplicate repairs.
     inherit nodejs;
-    npmDepsHash = "sha256-NNK1RLvEDF7Cj4BebTbEx5MNCEHZc2KQTmaoKmpAMYw=";
+    npmDepsHash = "sha256-yWWKLAeHthuZcA6x84ME8SFjTVqAEtL+yX7G8QGj2II=";
 
     # No Husky setup, prepack, Windows artifact verification, or external downloads.
     npmRebuildFlags = [ "--ignore-scripts" ];
@@ -90,9 +90,9 @@ let
       import { readFileSync } from 'node:fs';
       const report = JSON.parse(readFileSync(process.argv[2], 'utf8'));
       assert.equal(report.healthy, true);
-      assert.equal(report.server.version, '6.4.0');
+      assert.equal(report.server.version, '6.7.0');
       assert.equal(report.inventory.tools.expected, report.inventory.tools.observed);
-      assert.equal(report.inventory.tools.observed, 187);
+      assert.equal(report.inventory.tools.observed, 210);
       assert.equal(report.inventory.prompts.observed, 6);
       console.log(JSON.stringify(report));
   JS
@@ -170,7 +170,7 @@ let
     # startup budget; cancellation and the 30s MCP readiness cap stay intact.
     # This only affects the explicitly enabled REA server.
     timeout = 1860;
-    expectedTools = 187;
+    expectedTools = 210;
   });
   piReaMode = pkgs.stdenvNoCC.mkDerivation {
     pname = "pi-rea-mode";

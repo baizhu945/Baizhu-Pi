@@ -70,7 +70,7 @@ export function validateConfig(value: unknown): Config {
   if (typeof value.timeout !== "number" || !Number.isFinite(value.timeout) || value.timeout <= 0 || value.timeout > 3600) {
     throw new Error("timeout must be finite seconds in (0, 3600]");
   }
-  const expectedTools = value.expectedTools ?? 187;
+  const expectedTools = value.expectedTools ?? 210;
   if (typeof expectedTools !== "number" || !Number.isSafeInteger(expectedTools) || expectedTools < 1 || expectedTools > 10000) {
     throw new Error("expectedTools must be a positive safe integer <= 10000");
   }

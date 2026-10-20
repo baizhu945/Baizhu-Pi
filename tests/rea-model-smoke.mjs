@@ -55,7 +55,7 @@ try {
   await session.bindExtensions({ mode: "tui", uiContext: ui, onError: error => errors.push(error) });
   session.setThinkingLevel("minimal");
   await session.prompt("/rea on");
-  assert.equal(session.getActiveToolNames().filter(name => name.startsWith("mcp__rea__")).length, 187);
+  assert.equal(session.getActiveToolNames().filter(name => name.startsWith("mcp__rea__")).length, 210);
   timer = setTimeout(() => { void session.abort(); }, 90_000);
   await session.prompt("This is a restricted compatibility test. Call mcp__rea__binary_session exactly once with {}. Do not call any other tool, do not read any files or output paths, do not run commands. After that one status result, reply with exactly REA_READY. You do not need to interpret or investigate the status.");
   const last = session.messages.findLast(message => message.role === "assistant");
@@ -66,7 +66,7 @@ try {
   assert.equal(result?.isError, false);
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ status: "pass", provider, model: modelId,
-    active_tools: session.getActiveToolNames().length, REA_tools: 187, executed_tools: calls,
+    active_tools: session.getActiveToolNames().length, REA_tools: 210, executed_tools: calls,
     final: session.getLastAssistantText(), usage: last.usage,
     restrictions: "one target-free status call; all other tool calls blocked; ephemeral session" }, null, 2));
 } finally {
