@@ -51,9 +51,14 @@ Binwalk/Unblob/Wakaru 等可选引擎不被自动安装。
 
 思考显示可用 `Ctrl+T` 或 `Alt+T` 切换。`models.json` 是为了覆盖模型目录中的上下文窗口；`pi.nix` 中默认模型附近的注释曾有过时表述，运行行为以 `settings.defaultModel` 为准。
 
-## 权限说明
+## 工具调用审核
 
-本配置不部署自定义 `permission-gate.ts`；工具权限遵循 Pi 本身、运行环境及各扩展的既有策略。不要在 Home Manager 激活时重新添加该文件。
+`extensions/permission/` 是本地 Pi 扩展，默认关闭，不向模型添加 prompt 或工具：
+
+- `/permission` 可切换审核；也支持 `/permission on|off|status`。关闭时不拦截工具调用。
+- 开启后，`Read`、Pi 内置只读工具、标记为只读的工具及 `pi-web-access` 工具直接放行；其他工具每次询问 `Allow`、`Deny` 或 `Always Allow`。原生审批选择器会列出当前 AI 回复中的全部工具调用及参数，并标明当前正在审批的调用；`write` 显示新增内容，`edit` 显示红/绿差异预览。
+- `Always Allow` 会在当前 session 自动批准后续所有工具调用；`Deny` 会阻止当次执行，并把“用户拒绝了本次调用”的原因作为工具错误结果返回给 AI。取消或审批失败会安全拒绝。
+- 开关与 `Always Allow` 状态均只保存在内存中；新建、恢复、fork 或 reload 后默认关闭。审核扩展由 Home Manager 安装，修改后执行 `home-manager switch` 并在 Pi 中 `/reload`。
 
 ## 子代理编排与可视化
 

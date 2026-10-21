@@ -12,6 +12,7 @@ let
     node ${./tests/all-plugin-audit.mjs} \
       ${pkgs.pi-coding-agent}/lib/node_modules/pi-monorepo \
       ${./extensions} ${auditDependencies}
+    node ${./tests/permission.test.mjs} ${./extensions/permission/index.ts}
     touch "$out"
   '';
 in
@@ -35,5 +36,10 @@ in
     };
 
     ".pi/agent/extensions/background-commands.ts".source = ./extensions/background-commands.ts;
+
+    ".pi/agent/extensions/permission" = {
+      source = ./extensions/permission;
+      recursive = true;
+    };
   };
 }
