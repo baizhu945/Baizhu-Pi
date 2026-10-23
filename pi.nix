@@ -41,9 +41,6 @@
       }
     '';
 
-    # ---- 快捷键：思维链折叠/展开（alt+t 为未占用的新键，ctrl+t 为内置默认）----
-    ".pi/agent/keybindings.json".source = ./keybindings.json;
-
     ".pi/agent/models.json".source = ./models.json;
   };
 }

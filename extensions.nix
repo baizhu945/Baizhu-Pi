@@ -21,7 +21,7 @@ in
   home.extraDependencies = [ pluginAudit ];
   imports = [
     ./extensions/subagents.nix
-    ./extensions/fusion.nix
+    # ./extensions/fusion.nix
     ./extensions/tasks.nix
     ./extensions/rpiv-ask-user-question.nix
     ./extensions/pi-goal.nix
