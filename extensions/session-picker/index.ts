@@ -4,9 +4,10 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
   SessionManager,
-  SessionSelectorComponent,
 } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, type TUI } from "@earendil-works/pi-tui";
+import { copySessionFamily } from "./copy-session.ts";
+import { CopyableSessionSelector } from "./native-picker.ts";
 import { routeFocusedEditor, type SubmitRoutes } from "./editor.ts";
 import { type Choice, type Loader, newState, SessionPicker } from "./picker.ts";
 import { pathKey } from "./tree.ts";
@@ -25,6 +26,7 @@ export function sessionLoader(ctx: ExtensionContext): Loader {
 
 export default function (pi: ExtensionAPI): void {
   let unsubscribe: (() => void) | undefined;
+  let copiedSessionPath: string | undefined;
 
   pi.on("session_start", (_event, ctx) => {
     unsubscribe?.();
@@ -57,7 +59,7 @@ export default function (pi: ExtensionAPI): void {
     description: "Resume sessions with child sessions collapsed (also used by /resume)",
     handler: async (_args, ctx) => {
       if (ctx.mode !== "tui") { ctx.ui.notify("Session picker requires terminal UI", "warning"); return; }
-      const state = newState();
+      const state = newState(copiedSessionPath);
       const sessionId = ctx.sessionManager.getSessionId();
       const current = () => {
         try { return ctx.sessionManager.getSessionId() === sessionId; } catch { return false; }
@@ -66,12 +68,20 @@ export default function (pi: ExtensionAPI): void {
       while (true) {
         const choice = await ctx.ui.custom<Choice>((tui, theme, keys, done) => new SessionPicker(
           state, sessionLoader(ctx), theme, keys, () => tui.requestRender(), done, currentPath,
+          (path) => { copiedSessionPath = path; },
         ));
         if (!current()) return;
         if (!choice) return;
         try {
           if (choice.kind === "resume") {
             await ctx.switchSession(choice.path);
+            return; // The old context is invalid after a successful switch.
+          }
+          if (choice.kind === "paste") {
+            ctx.ui.notify("Copying session and subagent sessions…", "info");
+            const copiedPath = await copySessionFamily(choice.path);
+            if (!current()) return;
+            await ctx.switchSession(copiedPath);
             return; // The old context is invalid after a successful switch.
           }
           if (choice.kind === "rename") {
@@ -110,13 +120,21 @@ export default function (pi: ExtensionAPI): void {
     handler: async (_args, ctx) => {
       if (ctx.mode !== "tui") { ctx.ui.notify("Session picker requires terminal UI", "warning"); return; }
       const loader = sessionLoader(ctx);
-      const path = await ctx.ui.custom<string | undefined>((tui, _theme, keys, done) => new SessionSelectorComponent(
+      const path = await ctx.ui.custom<string | undefined>((tui, _theme, keys, done) => new CopyableSessionSelector(
         (progress, signal) => loader("current", progress ?? (() => {}), signal ?? new AbortController().signal),
         (progress, signal) => loader("all", progress ?? (() => {}), signal ?? new AbortController().signal),
         done, () => done(undefined), () => { done(undefined); ctx.shutdown(); },
         () => tui.requestRender(),
         { keybindings: keys, showRenameHint: true, renameSession: async (file, name) => { if (name.trim()) SessionManager.open(file).appendSessionInfo(name.trim()); } },
         ctx.sessionManager.getSessionFile(),
+        () => copiedSessionPath,
+        (sourcePath) => { copiedSessionPath = sourcePath; },
+        async (sourcePath) => {
+          ctx.ui.notify("Copying session and subagent sessions…", "info");
+          return copySessionFamily(sourcePath);
+        },
+        (error) => ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"),
+        () => ctx.ui.notify("Session copied to clipboard", "info"),
       ));
       if (path) await ctx.switchSession(path);
     },

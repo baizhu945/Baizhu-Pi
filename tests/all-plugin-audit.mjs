@@ -263,6 +263,147 @@ await test('Goal waits re-arm far-future deadlines and ignore old timer callback
 });
 
 const tree = await load('session-picker/tree.ts');
+const sessionCopy = await load('session-picker/copy-session.ts');
+await test('Session copy clones active branch and recursively relinks persisted subagent sessions', async () => {
+  const cwd = path.join(scratch, 'copy-family-main');
+  const root = sdk.SessionManager.create(cwd);
+  root.appendSessionInfo('Main task');
+  root.appendMessage({ role: 'user', content: 'root prompt', timestamp: Date.now() });
+  const rootPromptId = root.getLeafId();
+  root.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'old branch' }], timestamp: Date.now() });
+  root.branch(rootPromptId);
+  root.appendMessage({ role: 'user', content: 'active branch prompt', timestamp: Date.now() });
+  const rootPath = root.getSessionFile();
+  assert(rootPath);
+
+  const child = sdk.SessionManager.create(path.join(scratch, 'copy-family-child'), undefined, { parentSession: rootPath });
+  child.appendSessionInfo('worker#child');
+  child.appendMessage({ role: 'user', content: 'child prompt', timestamp: Date.now() });
+  const childPath = child.getSessionFile();
+  assert(childPath);
+  const nested = sdk.SessionManager.create(path.join(scratch, 'copy-family-nested'), undefined, { parentSession: childPath });
+  nested.appendSessionInfo('worker#nested');
+  nested.appendMessage({ role: 'user', content: 'nested prompt', timestamp: Date.now() });
+  const nestedPath = nested.getSessionFile();
+  assert(nestedPath);
+
+  const copyPath = await sessionCopy.copySessionFamily(rootPath);
+  const copy = sdk.SessionManager.open(copyPath);
+  assert.notEqual(copyPath, rootPath);
+  assert.equal(copy.getHeader().parentSession, undefined, 'a pasted root session is standalone, not a child of its source');
+  assert.deepEqual(copy.buildSessionContext().messages.map(message => message.content), ['root prompt', 'active branch prompt']);
+  assert.deepEqual(root.buildSessionContext().messages.map(message => message.content), ['root prompt', 'active branch prompt']);
+  assert.equal(copy.getSessionName(), 'Copy of Main task');
+  const copies = await sdk.SessionManager.listAll();
+  assert.equal(copies.find(session => session.path === copyPath).parentSessionPath, undefined);
+  const childCopyInfo = copies.find(session => session.parentSessionPath === copyPath);
+  assert(childCopyInfo, 'copied subagent session should point to copied main session');
+  assert.notEqual(childCopyInfo.path, childPath);
+  assert.equal(sdk.SessionManager.open(childCopyInfo.path).getHeader().parentSession, copyPath);
+  const nestedCopyInfo = copies.find(session => session.parentSessionPath === childCopyInfo.path);
+  assert(nestedCopyInfo, 'nested subagent session should point to copied parent subagent');
+  assert.notEqual(nestedCopyInfo.path, nestedPath);
+  assert.equal(sdk.SessionManager.open(nestedCopyInfo.path).getHeader().parentSession, childCopyInfo.path);
+  assert.equal(sdk.SessionManager.open(childPath).getHeader().parentSession, rootPath, 'original child lineage stays unchanged');
+  assert.equal(sdk.SessionManager.open(nestedPath).getHeader().parentSession, childPath, 'original nested lineage stays unchanged');
+
+  const secondCopyPath = await sessionCopy.copySessionFamily(rootPath);
+  const afterSecondCopy = await sdk.SessionManager.listAll();
+  const secondChild = afterSecondCopy.find(session => session.parentSessionPath === secondCopyPath);
+  assert(secondChild, 'a later copy must still include original subagents');
+  assert.equal(afterSecondCopy.filter(session => session.parentSessionPath === secondChild.path).length, 1,
+    'previous copies are not mistaken for subagents and duplicated recursively');
+});
+await test('Both session pickers expose copy/paste keys and act on the selected session', async () => {
+  const pickerModule = await load('session-picker/picker.ts');
+  const { CopyableSessionSelector } = await load('session-picker/native-picker.ts');
+  const session = { path: path.join(scratch, 'synthetic-session.jsonl'), id: 'synthetic', cwd: scratch,
+    modified: new Date(), created: new Date(), messageCount: 1, name: 'Selected session', firstMessage: 'first prompt', allMessagesText: 'first prompt' };
+  const loader = async () => [session];
+  const customState = pickerModule.newState();
+  let customClipboard, customChoice;
+  const custom = new pickerModule.SessionPicker(customState, loader, theme, tui.getKeybindings(), () => {},
+    choice => { customChoice = choice; }, undefined, selected => { customClipboard = selected; });
+  await flush();
+  assert(custom.render(100).some(line => line.includes('Ctrl+Alt+C copy') && line.includes('Ctrl+Alt+V paste')));
+  custom.handleInput('\x1b[99;7u');
+  assert.equal(customClipboard, session.path);
+  custom.handleInput('\x1b[118;7u');
+  assert.equal(customChoice.kind, 'paste');
+  assert.equal(customChoice.path, session.path);
+
+  let nativeClipboard, nativeSelected, nativeCopiedNotice;
+  const native = new CopyableSessionSelector(loader, loader, selected => { nativeSelected = selected; }, () => {}, () => {},
+    () => {}, { keybindings: tui.getKeybindings(), showRenameHint: true }, undefined,
+    () => nativeClipboard, selected => { nativeClipboard = selected; }, async () => '/synthetic/copied-session.jsonl',
+    error => { throw error; }, selected => { nativeCopiedNotice = selected; });
+  await flush();
+  assert(native.render(100).some(line => line.includes('Ctrl+Alt+C copy') && line.includes('Ctrl+Alt+V paste')));
+  native.handleInput('\x1b[99;7u');
+  assert.equal(nativeClipboard, session.path);
+  assert.equal(nativeCopiedNotice, session.path);
+  native.handleInput('\x1b[118;7u');
+  await flush();
+  assert.equal(nativeSelected, '/synthetic/copied-session.jsonl');
+  for (const width of [1, 10, 24, 80]) {
+    assert(custom.render(width).every(line => tui.visibleWidth(line) <= width));
+    assert(native.render(width).every(line => tui.visibleWidth(line) <= width));
+  }
+});
+const sessionPickerExtension = await load('session-picker/index.ts');
+const sessionPickerEditor = await load('session-picker/editor.ts');
+await test('Existing /resume and /resume-native registrations and routing remain intact', () => {
+  const commands = new Map();
+  sessionPickerExtension.default({ on() {}, registerCommand(name, options) { commands.set(name, options); } });
+  assert(commands.has('session-picker'), 'the existing /resume destination remains registered');
+  assert(commands.has('resume-native'), 'the upstream native picker command remains registered');
+  assert.equal(sessionPickerEditor.routeResume('/resume'), '/session-picker');
+  assert.equal(sessionPickerEditor.routeResume('/resume-native'), '/resume-native');
+});
+await test('Both resume commands copy the selected session and resume a linked subagent copy', async () => {
+  const cwd = path.join(scratch, 'resume-copy-integration');
+  const root = sdk.SessionManager.create(cwd);
+  root.appendSessionInfo('Resume integration');
+  root.appendMessage({ role: 'user', content: 'parent conversation', timestamp: Date.now() });
+  const rootPath = root.getSessionFile();
+  assert(rootPath);
+  const child = sdk.SessionManager.create(path.join(scratch, 'resume-copy-child'), undefined, { parentSession: rootPath });
+  child.appendSessionInfo('worker#integration');
+  child.appendMessage({ role: 'user', content: 'subagent conversation', timestamp: Date.now() });
+
+  const commands = new Map();
+  sessionPickerExtension.default({ on() {}, registerCommand(name, options) { commands.set(name, options); } });
+  const switchedPaths = [];
+  const ctx = {
+    mode: 'tui', sessionManager: root, switchSession: async sessionPath => switchedPaths.push(sessionPath), shutdown() {},
+    ui: {
+      notify() {},
+      async custom(factory) {
+        return new Promise((resolve, reject) => {
+          const component = factory({ requestRender() {} }, theme, tui.getKeybindings(), resolve);
+          const hasSelection = () => component.getRows?.().length > 0 || !!component.getSessionList?.().getSelectedSessionPath();
+          void (async () => {
+            for (let i = 0; i < 100 && !hasSelection(); i++) await new Promise(done => setTimeout(done, 2));
+            assert(hasSelection(), 'picker loaded the source session');
+            component.handleInput('\x1b[99;7u');
+            component.handleInput('\x1b[118;7u');
+          })().catch(reject);
+        });
+      },
+    },
+  };
+  await commands.get('session-picker').handler('', ctx);
+  await commands.get('resume-native').handler('', ctx);
+  assert.equal(switchedPaths.length, 2, 'both pickers continue in their copied session');
+  for (const copyPath of switchedPaths) {
+    assert.notEqual(copyPath, rootPath);
+    const listed = await sdk.SessionManager.listAll();
+    assert.equal(listed.find(session => session.path === copyPath).parentSessionPath, undefined,
+      'both picker commands resume independent root sessions');
+    const copiedChild = listed.find(session => session.parentSessionPath === copyPath);
+    assert(copiedChild, 'copied subagent remains linked to its copied main session');
+  }
+});
 await test('Session picker handles a 10,000-level fork tree with bounded prefixes and no recursion', () => {
   const sessions = Array.from({ length: 10000 }, (_, i) => ({ path: path.join(scratch, `session-${i}`), parentSessionPath: i ? path.join(scratch, `session-${i - 1}`) : undefined, modified: new Date(i), id: String(i) }));
   const { roots } = tree.buildTree(sessions);

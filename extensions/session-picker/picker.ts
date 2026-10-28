@@ -3,7 +3,7 @@ import { type Component, type Focusable, Input, matchesKey, truncateToWidth, vis
 import { buildTree, expandSubtree, flatten, type Node, pathKey, type Row, search, type SortMode } from "./tree.ts";
 
 export type Scope = "current" | "all";
-export type Choice = { kind: "resume" | "rename" | "delete"; path: string; name?: string } | undefined;
+export type Choice = { kind: "resume" | "rename" | "delete" | "paste"; path: string; name?: string } | undefined;
 // Pi publishes counts on every update, but session snapshots only periodically.
 export type ListProgress = NonNullable<Parameters<typeof SessionManager.list>[2]>;
 export type Loader = (scope: Scope, progress: ListProgress, signal: AbortSignal) => Promise<SessionInfo[]>;
@@ -15,9 +15,10 @@ export interface PickerState {
   query: string;
   expanded: Set<string>;
   selected?: string;
+  clipboardPath?: string;
 }
-export function newState(): PickerState {
-  return { scope: "current", sort: "threaded", named: false, showPath: false, query: "", expanded: new Set() };
+export function newState(clipboardPath?: string): PickerState {
+  return { scope: "current", sort: "threaded", named: false, showPath: false, query: "", expanded: new Set(), clipboardPath };
 }
 
 export class SessionPicker implements Component, Focusable {
@@ -33,6 +34,7 @@ export class SessionPicker implements Component, Focusable {
   private status = "";
   private touched = false;
   private currentKey?: string;
+  private actionStatus = "";
   private _focused = false;
   get focused(): boolean { return this._focused; }
   set focused(value: boolean) { this._focused = value; this.input.focused = value; }
@@ -45,6 +47,7 @@ export class SessionPicker implements Component, Focusable {
     private requestRender: () => void,
     private done: (choice: Choice) => void,
     currentPath?: string,
+    private onCopy: (path: string) => void = () => {},
   ) {
     this.currentKey = currentPath ? pathKey(currentPath) : undefined;
     this.input.setValue(state.query);
@@ -138,6 +141,28 @@ export class SessionPicker implements Component, Focusable {
     if (this.disposed) return;
     this.touched = true;
     if (this.kb.matches(data, "tui.select.cancel")) { this.dispose(); this.done(undefined); return; }
+    if (matchesKey(data, "ctrl+alt+c")) {
+      const session = this.selectedRow()?.node.session;
+      if (session) {
+        this.state.clipboardPath = session.path;
+        this.onCopy(session.path);
+        const label = (session.name ?? session.firstMessage).replace(/[\x00-\x1f\x7f]/g, " ").trim().slice(0, 100);
+        this.actionStatus = `Copied ${label}`;
+      } else this.actionStatus = "No session selected to copy";
+      this.requestRender();
+      return;
+    }
+    if (matchesKey(data, "ctrl+alt+v")) {
+      if (!this.state.clipboardPath) {
+        this.actionStatus = "No copied session; select one and press Ctrl+Alt+C first";
+        this.requestRender();
+        return;
+      }
+      this.dispose();
+      this.done({ kind: "paste", path: this.state.clipboardPath });
+      return;
+    }
+    this.actionStatus = "";
     if (this.kb.matches(data, "tui.input.tab")) {
       this.state.scope = this.state.scope === "current" ? "all" : "current";
       void this.load();
@@ -208,6 +233,8 @@ export class SessionPicker implements Component, Focusable {
     }
     if (!this.rows.length && !this.loading) lines.push(this.theme.fg("muted", "No matching sessions"));
     lines.push(this.theme.fg("muted", `(${this.rows.length ? index + 1 : 0}/${this.rows.length}) ${keyText("tui.select.confirm")} resume · ${keyText("tui.select.cancel")} cancel · ${keyText("app.session.rename")} rename · ${keyText("app.session.delete")} delete · ${keyText("app.session.togglePath")} path`));
+    lines.push(this.theme.fg("muted", "Ctrl+Alt+C copy · Ctrl+Alt+V paste copied session"));
+    if (this.actionStatus) lines.push(this.theme.fg("success", this.actionStatus));
     if (this.status) lines.push(this.theme.fg(this.loading ? "muted" : "error", this.status));
     return lines.map(line => truncateToWidth(line, width, "…"));
   }
