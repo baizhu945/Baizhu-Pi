@@ -26,22 +26,8 @@ in
     ./extensions/pi-goal.nix
     ./extensions/pi-web-access.nix
     ./extensions/pi-open-tui.nix
+    ./extensions/session-picker.nix
+    ./extensions/background-commands.nix
+    ./extensions/permission.nix
   ];
-
-  home.file = {
-    ".pi/agent/extensions/session-picker" = {
-      source = ./extensions/session-picker;
-      recursive = true;
-    };
-
-    ".pi/agent/extensions/background-commands" = {
-      source = ./extensions/background-commands;
-      recursive = true;
-    };
-
-    ".pi/agent/extensions/permission" = {
-      source = ./extensions/permission;
-      recursive = true;
-    };
-  };
 }
