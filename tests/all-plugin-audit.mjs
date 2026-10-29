@@ -58,7 +58,21 @@ function registry() {
   const emit = async (name, data = {}, ctx = {}) => { for (const handler of handlers.get(name) ?? []) await handler(data, ctx); };
   return { pi, tools, messages, renderers, emit };
 }
-const background = await load('background-commands.ts');
+const background = await load('background-commands/background-commands.ts');
+await test('background is automatically discovered and registers its tools and commands', async () => {
+  const agentDir = path.join(scratch, 'discovery-agent');
+  const extensionDir = path.join(agentDir, 'extensions', 'background-commands');
+  fs.mkdirSync(path.dirname(extensionDir), { recursive: true });
+  fs.symlinkSync(path.join(source, 'background-commands'), extensionDir, 'dir');
+  const { discoverAndLoadExtensions } = await import(pathToFileURL(path.join(sdkRoot, 'dist/core/extensions/loader.js')));
+  const result = await discoverAndLoadExtensions([], scratch, agentDir);
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.extensions.length, 1, 'the directory must expose an auto-discoverable entry point');
+  const [extension] = result.extensions;
+  assert.equal(extension.path, path.join(extensionDir, 'index.ts'));
+  assert.deepEqual([...extension.tools.keys()], ['bg_run', 'bg_status', 'bg_kill']);
+  assert.deepEqual([...extension.commands.keys()], ['bg', 'jobs', 'kill']);
+});
 await test('background large chunks own only a bounded tail buffer', () => {
   const old = Buffer.alloc(65536, 97), chunk = Buffer.alloc(8 * 1024 * 1024, 98);
   const tail = background.appendOutputTail(old, chunk);

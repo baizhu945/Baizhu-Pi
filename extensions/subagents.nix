@@ -60,7 +60,7 @@ let
       node ${../tests/plugin-integrity.mjs} ${piPackageDir} "$out" ${./tasks}
       mkdir -p check-extensions
       ln -s "$out" check-extensions/pi-subagents
-      ln -s ${./background-commands.ts} check-extensions/background-commands.ts
+      ln -s ${./background-commands/background-commands.ts} check-extensions/background-commands.ts
       node ${../tests/completion-batching.mjs} ${piPackageDir} "$PWD/check-extensions"
       runHook postInstallCheck
     '';

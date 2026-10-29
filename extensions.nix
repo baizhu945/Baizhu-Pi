@@ -21,7 +21,6 @@ in
   home.extraDependencies = [ pluginAudit ];
   imports = [
     ./extensions/subagents.nix
-    # ./extensions/fusion.nix
     ./extensions/tasks.nix
     ./extensions/rpiv-ask-user-question.nix
     ./extensions/pi-goal.nix
@@ -35,7 +34,10 @@ in
       recursive = true;
     };
 
-    ".pi/agent/extensions/background-commands.ts".source = ./extensions/background-commands.ts;
+    ".pi/agent/extensions/background-commands" = {
+      source = ./extensions/background-commands;
+      recursive = true;
+    };
 
     ".pi/agent/extensions/permission" = {
       source = ./extensions/permission;
