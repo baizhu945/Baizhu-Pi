@@ -1,36 +1,43 @@
 { config, pkgs, ... }:
 
 let
+  # Pin REA's Node/build package set independently from channel-selected Pi.
+  # Node 24.22.1 provides the DatabaseSync.limits API required by REA 6.8.
+  pinnedPkgs = (import ../dsh/environment.nix { }).pkgs;
   # REA is a private dependency of the explicit Pi mode, not a global command
   # or an extra package on ordinary Pi's PATH. Never run REA's setup installer.
   rea = let
     inherit (pkgs) lib;
-    nodejs = pkgs.nodejs_24;
-    revision = "0c440bfc07f3cb343e2e836d27cccaed539cfe9c";
+    nodejs = pinnedPkgs.nodejs_24;
+    revision = "160d821ac9a0310afcb8d1fc427862dd6508add5";
     packageChecks = pkgs.lib.cleanSourceWith {
       src = ./rea-package;
       filter = path: type: type == "directory" || builtins.elem (baseNameOf path) [
-        "schema-portability.mjs" "catalog.mjs" "sqlite-inspection.mjs"
+        "schema-portability.mjs" "catalog.mjs" "ghidra-startup-budget.mjs" "sqlite-inspection.mjs"
       ];
     };
-  in pkgs.buildNpmPackage {
+  in pinnedPkgs.buildNpmPackage {
     pname = "rea-agents";
-    version = "6.7.0";
+    version = "6.8.0";
 
-    src = pkgs.fetchzip {
-      url = "https://github.com/morluto/rea/archive/${revision}.tar.gz";
-      hash = "sha256-afd2BLZVThTeU+R8I+oeTh3q/6mO6sMkfJyuo5/inwM=";
+    src = pinnedPkgs.fetchFromGitHub {
+      owner = "morluto";
+      repo = "rea";
+      rev = revision;
+      hash = "sha256-2ADn3U3lvUoB4tCEpzO0rMfYE4sis+5uBiEazcp0gpI=";
     };
-    # Ghidra budgets and portable schema patterns are supported upstream.
-    # Keep compiled wire-schema regression checks rather than duplicate repairs.
+    # One 6.8 path-regex portability patch is checked against upstream's
+    # canonical parser and the live full-profile schema below.
+    patchFlags = [ "-p1" "--fuzz=0" ];
+    patches = [ ./rea-package/schema-portability-6.8.patch ];
     inherit nodejs;
-    npmDepsHash = "sha256-yWWKLAeHthuZcA6x84ME8SFjTVqAEtL+yX7G8QGj2II=";
+    npmDepsHash = "sha256-3WPXD+qm5WVfrTEvepKwX5RZBfbLBcPB0uDmKIx4MR8=";
 
     # No Husky setup, prepack, Windows artifact verification, or external downloads.
     npmRebuildFlags = [ "--ignore-scripts" ];
     env.HUSKY = "0";
-    nativeBuildInputs = [ pkgs.autoPatchelfHook ];
-    buildInputs = [ pkgs.stdenv.cc.cc.lib ];
+    nativeBuildInputs = [ pinnedPkgs.autoPatchelfHook ];
+    buildInputs = [ pinnedPkgs.stdenv.cc.cc.lib ];
 
     buildPhase = ''
       runHook preBuild
@@ -43,7 +50,7 @@ let
       node scripts/check-dependency-install.mjs
       npm run compile
       npm run artifacts:skills
-      # 6.4 compiles and bundles runtime entries, then generates the shipped
+      # 6.8 compiles and bundles runtime entries, then generates the shipped
       # skill. MCP catalog cache is test metadata, not a runtime dependency.
       test -s skills/reverse-engineer-anything/SKILL.md
       test ! -e dist/generatedMcpToolCatalog.js
@@ -54,17 +61,18 @@ let
       runHook preInstall
       npm prune --omit=dev --ignore-scripts
       runtime="$out/lib/rea-agents"
-      mkdir -p "$runtime/scripts" "$out/bin"
+      mkdir -p "$runtime/scripts/lib" "$out/bin"
       cp -r dist bridge skills third_party licenses node_modules "$runtime/"
       cp package.json package-lock.json README.md DISCLAIMER.md THIRD_PARTY_NOTICES.md LICENSE install.sh "$runtime/"
       cp scripts/rea.mjs scripts/electron-active-hook.cjs \
         scripts/electron-active-hook-boundaries.cjs scripts/hopper-demo-x11.py \
         scripts/verify-windows-native-artifact.mjs scripts/prepack.mjs scripts/prepare.mjs \
         "$runtime/scripts/"
+      cp scripts/lib/cli-process-environment.mjs "$runtime/scripts/lib/"
       # Absolute Node path, irrespective of the caller's PATH. Do not expose npm.
       cat > "$out/bin/rea" <<EOF
-  #!${pkgs.runtimeShell}
-  export PATH="${pkgs.procps}/bin:\$PATH"
+  #!${pinnedPkgs.runtimeShell}
+  export PATH="${pinnedPkgs.procps}/bin:\$PATH"
   exec ${nodejs}/bin/node "$runtime/scripts/rea.mjs" "\$@"
   EOF
       chmod +x "$out/bin/rea"
@@ -79,10 +87,10 @@ let
       export XDG_CONFIG_HOME="$HOME/config"
       export XDG_CACHE_HOME="$HOME/cache"
       mkdir -p "$HOME"
-      ${nodejs}/bin/node ${./rea-package/ghidra-startup-budget.mjs} "$out/lib/rea-agents"
+      ${nodejs}/bin/node ${packageChecks}/ghidra-startup-budget.mjs "$out/lib/rea-agents"
       ${nodejs}/bin/node ${packageChecks}/schema-portability.mjs \
-        "$out/lib/rea-agents" ${pkgs.ripgrep}/bin/rg
-      ${nodejs}/bin/node ${packageChecks}/sqlite-inspection.mjs "$out/lib/rea-agents" ${pkgs.procps}/bin
+        "$out/lib/rea-agents" ${pinnedPkgs.ripgrep}/bin/rg
+      ${nodejs}/bin/node ${packageChecks}/sqlite-inspection.mjs "$out/lib/rea-agents" ${pinnedPkgs.procps}/bin
       env PATH=/nonexistent "$out/bin/rea" --version
       env PATH=/nonexistent "$out/bin/rea" mcp doctor --json > "$HOME/mcp-doctor.json"
       ${nodejs}/bin/node --input-type=module - "$HOME/mcp-doctor.json" <<'JS'
@@ -90,9 +98,9 @@ let
       import { readFileSync } from 'node:fs';
       const report = JSON.parse(readFileSync(process.argv[2], 'utf8'));
       assert.equal(report.healthy, true);
-      assert.equal(report.server.version, '6.7.0');
+      assert.equal(report.server.version, '6.8.0');
       assert.equal(report.inventory.tools.expected, report.inventory.tools.observed);
-      assert.equal(report.inventory.tools.observed, 210);
+      assert.equal(report.inventory.tools.observed, 229);
       assert.equal(report.inventory.prompts.observed, 6);
       console.log(JSON.stringify(report));
   JS
@@ -150,27 +158,30 @@ let
     command = "${rea}/bin/rea";
     args = [ "mcp" ];
     env = {
-      GHIDRA_INSTALL_DIR = "${pkgs.ghidra}/lib/ghidra";
-      JAVA_HOME = "${pkgs.jdk21}";
+      GHIDRA_INSTALL_DIR = "${pinnedPkgs.ghidra}/lib/ghidra";
+      JAVA_HOME = "${pinnedPkgs.jdk21}";
       # The first deep query runs a complete headless import/auto-analysis.
       # A 176 MB native target exhausted upstream's fixed 330-second budget.
       REA_GHIDRA_STARTUP_TIMEOUT_MS = "1800000";
       GHIDRA_HEADLESS_MAXMEM = "8G";
       REA_ANALYSIS_PROVIDER = "ghidra";
+      # Keep the browser on Pi's existing package set; pinning this to the
+      # standalone DSH set would force a separate Chromium source build.
       REA_BROWSER_EXECUTABLE = "${pkgs.chromium}/bin/chromium";
-      # Upstream's new offline EVM worker defaults to /usr/bin/prlimit.
-      REA_EVM_PRLIMIT_COMMAND = "${pkgs.util-linux}/bin/prlimit";
-      REA_JAVASCRIPT_PRLIMIT_COMMAND = "${pkgs.util-linux}/bin/prlimit";
-      REA_FIRMWARE_PRLIMIT_COMMAND = "${pkgs.util-linux}/bin/prlimit";
-      REA_TSHARK_PRLIMIT_COMMAND = "${pkgs.util-linux}/bin/prlimit";
-      REA_SIGROK_PRLIMIT_COMMAND = "${pkgs.util-linux}/bin/prlimit";
+      # Upstream's offline analysis workers default to /usr/bin/prlimit.
+      REA_EVM_PRLIMIT_COMMAND = "${pinnedPkgs.util-linux}/bin/prlimit";
+      REA_JAVASCRIPT_PRLIMIT_COMMAND = "${pinnedPkgs.util-linux}/bin/prlimit";
+      REA_FIRMWARE_PRLIMIT_COMMAND = "${pinnedPkgs.util-linux}/bin/prlimit";
+      REA_TSHARK_PRLIMIT_COMMAND = "${pinnedPkgs.util-linux}/bin/prlimit";
+      REA_SIGROK_PRLIMIT_COMMAND = "${pinnedPkgs.util-linux}/bin/prlimit";
       REA_LOG_LEVEL = "silent";
+      REA_MCP_INPUT_SCHEMA_PROFILE = "full";
     };
     # Pi uses seconds. Leave cleanup margin beyond the 30-minute provider
     # startup budget; cancellation and the 30s MCP readiness cap stay intact.
     # This only affects the explicitly enabled REA server.
     timeout = 1860;
-    expectedTools = 210;
+    expectedTools = 229;
   });
   piReaMode = pkgs.stdenvNoCC.mkDerivation {
     pname = "pi-rea-mode";

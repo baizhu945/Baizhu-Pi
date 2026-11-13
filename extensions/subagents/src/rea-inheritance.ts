@@ -5,7 +5,10 @@
  * Never apply it to task text or inherited conversation messages.
  */
 const MODE_MARKER = "REA mode is explicitly authorized for this session. Use mcp__rea__ tools for reverse engineering.";
-const TOOLS_FOOTER = "In addition to the tools above, you may have access to other custom tools depending on the project.";
+const TOOLS_FOOTERS = new Set([
+  "In addition to the tools above, you may have access to other custom tools depending on the project.",
+  "Additional tools may be available.",
+]);
 
 interface Line { start: number; end: number; text: string; }
 interface Section { name: string; start: number; end: number; bodyStart: number; bodyEnd: number; }
@@ -97,7 +100,7 @@ function withoutEntries(body: string, kind: "tools" | "mcp_servers"): string {
   for (const line of lines(body)) {
     const nextFence = fenceEnd(line.text, fence);
     if (fence || nextFence) { fence = nextFence; continue; }
-    if (kind === "tools" && line.text === TOOLS_FOOTER) {
+    if (kind === "tools" && TOOLS_FOOTERS.has(line.text)) {
       // This footer is not a continuation of the final tool's description.
       // Preserve its separating blank lines byte-for-byte as well.
       listEnd = line.start;

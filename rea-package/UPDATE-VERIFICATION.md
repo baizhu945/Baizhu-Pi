@@ -1,4 +1,12 @@
-# REA 6.4.0 update verification — 2026-10-13
+# Current Pi REA 6.8.0 update
+
+Latest published GitHub release: `160d821ac9a0310afcb8d1fc427862dd6508add5`.
+The pinned Node 24.22.1, source/npm hashes, 229-tool catalog, full-schema profile,
+missing runtime helper and portable request-path patch are being built and checked.
+Do not treat the 6.4.0 deployment record below as evidence for 6.8.0; append this
+update's package and Pi SDK test results here after verification.
+
+## Historical REA 6.4.0 update verification — 2026-10-13
 
 Traditional `home-manager build -f home.nix` and `home-manager switch -f home.nix`
 completed; generation **2155**:

@@ -56,7 +56,8 @@ const policy = reaArg ? (await jiti.import(path.join(path.resolve(reaArg), 'inde
 assert(policy.startsWith(marker), 'Controller marker and inheritance parser must agree');
 const reaBlock = `<rea>\n${policy}\n</rea>`;
 const names = `annotate_native_function inspect_native_load_image inspect_native_data_type inspect_native_instruction resolve_native_call_targets address_name comment current_address current_procedure current_document goto_address inline_comment list_bookmarks list_documents list_names list_procedures list_segments list_strings next_address prev_address procedure_address procedure_assembly procedure_callees procedure_callers procedure_info read_function_instructions search_bytes read_bytes address_to_file_offset procedure_references procedure_pseudo_code resolve_containing_procedure search_procedures search_strings set_address_name set_addresses_names set_bookmark set_comment set_inline_comment unset_bookmark xrefs inspect_native_dispatch_metadata get_objc_classes get_objc_protocols batch_decompile get_call_graph analyze_swift_types find_xrefs_to_name binary_overview analyze_function inspect_native_api trace_feature trace_call_path trace_native_ui_action trace_native_values observe_native_ui capture_native_ui_scenario observe_native_calls inspect_macho inspect_signature inspect_plist list_architectures demangle_swift inspect_pe_resources inspect_binary_layout inspect_recorded_crash inspect_analysis_view inspect_artifact extract_artifact decode_interface_builder inspect_keyed_archive inspect_asset_catalog trace_dylib_resolution inspect_desktop_application inspect_evm_interface inspect_go_binary inspect_il2cpp_metadata inspect_rust_binary inspect_wasm_artifact compare_wasm_interfaces inspect_sqlite_database inspect_packet_fields inspect_packet_capture inspect_signal_decoders decode_signal_recording inspect_managed_artifact inspect_managed_members inspect_managed_native_boundaries inspect_android_package search_android_classes inspect_android_class inspect_android_method trace_android_references inspect_apktool_client decode_android_resources inspect_pcap_client inspect_pcap_capture identify_flutter_build inspect_dart_aot inspect_jeb_client open_jeb_project list_jeb_units decompile_jeb_item inspect_adb_client list_adb_devices inspect_adb_device list_adb_packages pull_adb_package read_adb_logcat inspect_adb_package pull_adb_file push_adb_file capture_adb_screen list_adb_processes list_adb_directory list_adb_features list_adb_services inspect_adb_display inspect_adb_window read_adb_setting collect_adb_bugreport resolve_adb_packages install_adb_package uninstall_adb_package start_adb_app start_adb_activity stop_adb_app inspect_firmware_regions extract_firmware compare_managed_members verify_managed_native_boundaries import_managed_reconstruction project_managed_application_graph list_browser_targets inspect_web_page analyze_web_bundle observe_web_session discover_webmcp_tools compare_web_captures capture_web_screenshot compare_web_screenshots capture_browser_scenario list_electron_targets inspect_electron_page analyze_javascript_application reconcile_javascript_runtime capture_electron_scenario inspect_electron_fuses list_javascript_runtime_targets observe_javascript_runtime trace_application_feature trace_javascript_semantics compare_application_versions compare_source_to_bundle compare_javascript_export_shapes build_reconstruction_obligation_ledger evaluate_reconstruction_coverage project_android_application_graph project_apple_application_graph project_harmony_application_graph trace_web_source_location trace_web_module_imports export_web_scripts observe_web_execution inspect_web_event_listeners inspect_web_network_capture recover_javascript_sources open_binary close_binary binary_session export_evidence_bundle import_evidence_bundle capture_process_scenario compare_process_captures compare_artifacts match_native_functions compare_functions compare_bundles find_changed_behavior build_call_path correlate_static_and_runtime verify_reconstruction list_unknowns record_unknown update_unknown verify_unknown_resolution get_evidence_bundle get_navigation_context inspect_address_context list_cutter_sessions cutter_command inspect_with_objdump execute_rizin_command start_gdb_session gdb_console gdb_session_status close_gdb_session start_rizin_debug_session rizin_debug_command rizin_debug_session_status close_rizin_debug_session list_frida_devices list_frida_processes start_frida_session load_frida_script resume_frida_session unload_frida_script frida_session_status close_frida_session instrument_with_frida`.split(/\s+/).map(name => `mcp__rea__${name}`);
-assert.equal(names.length, 210);
+names.push(...`inspect_analysis_settings update_analysis_settings decompile_all inspect_devicetree inspect_pe_load_config inspect_elf_notes inspect_apple_ips inspect_kernel_module inspect_byte_entropy inspect_pe_certificates inspect_pe_imports inspect_native_exports inspect_model_artifact inspect_gpu_code_objects inspect_python_pyc inspect_erlang_beam inspect_apk_signature export_environment_bundle open_bundle_resources`.split(/\s+/).map(name => `mcp__rea__${name}`));
+assert.equal(names.length, 229);
 const otherServers = 'MCP servers whose tools are not declared to you.\n- mcp__docs (codemode): Preserve docs server.\n- mcp__rea_extra (tool_search): Preserve distinct namespace.';
 const onServers = otherServers.replace('- mcp__rea_extra', '- mcp__rea (codemode): Reverse-engineering namespace\n  continuation must disappear\n- mcp__rea_extra');
 const fusion = '<fusion>\nFusion prefix and routing instructions: preserve exactly.\n</fusion>';
@@ -86,7 +87,7 @@ await test('cold parent is byte-for-byte unchanged; text and tool names are not 
   const child = buildAgentPrompt(config, '/fixture', { isGitRepo: false, platform: 'linux' }, base);
   assert(child.startsWith(`${base}\n\n<sub_agent_context>`));
 });
-await test('real SDK builder: 210 descriptions/continuations and only REA namespace are removed', () => {
+await test('real SDK builder: 229 descriptions/continuations and only REA namespace are removed', () => {
   for (const tail of [false, true]) {
     const cleaned = sanitize(parentPrompt({ tail }));
     assert.equal(cleaned, `${base}\n\n`);
@@ -150,7 +151,7 @@ async function fixture(t, prompt, produce = () => [{ type: 'text', text: 'Fixtur
     fs.chmodSync(controllerDir, 0o700);
     const copiedConfig = path.join(controllerDir, 'config.json');
     if (fs.existsSync(copiedConfig)) fs.chmodSync(copiedConfig, 0o600);
-    const server = path.join(scratch, 'native-210-fixture.mjs');
+    const server = path.join(scratch, 'native-229-fixture.mjs');
     fs.writeFileSync(server, `import { createInterface } from 'node:readline';
 const names = JSON.parse(process.argv[2]);
 const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
@@ -165,7 +166,7 @@ createInterface({ input: process.stdin }).on('line', line => {
 }).on('close', () => process.exit(0));
 `);
     fs.writeFileSync(path.join(controllerDir, 'config.json'), JSON.stringify({ command: process.execPath,
-      args: [server, JSON.stringify(names.map(name => name.slice('mcp__rea__'.length)))], env: {}, timeout: 5, expectedTools: 210 }));
+      args: [server, JSON.stringify(names.map(name => name.slice('mcp__rea__'.length)))], env: {}, timeout: 5, expectedTools: 229 }));
   }
   let ctx, api;
   const resourceLoader = new sdk.DefaultResourceLoader({ cwd: scratch, agentDir, settingsManager,
@@ -371,7 +372,7 @@ if (reaArg) for (const forced of [false, true]) {
     const idleBase = h.ctx().getSystemPrompt();
     await h.session.prompt('/rea on');
     assert.equal(h.captures.length, 0, 'Activation does not call a model');
-    assert.equal(h.session.getAllTools().filter(tool => tool.name.startsWith('mcp__rea__') && tool.exposure === 'direct').length, 210);
+    assert.equal(h.session.getAllTools().filter(tool => tool.name.startsWith('mcp__rea__') && tool.exposure === 'direct').length, 229);
     assert(!h.ctx().getSystemPrompt().includes(marker), 'Idle getter alone cannot detect this leak');
     await h.session.prompt('Call binary_session, then delegate through fixture_spawn.');
     assert.equal(childResult?.failure, undefined);
@@ -384,6 +385,6 @@ if (reaArg) for (const forced of [false, true]) {
     assertCleanRequest(h.captures[2], inherited);
     assert.equal(h.children[0].getAllTools().filter(tool => tool.name.startsWith('mcp__rea__')).length, 0, 'Child controller stays off, with no inherited native MCP');
     assert(h.ctx().getSystemPrompt().includes(idleBase), 'Settled getter restores the base');
-    console.log(`Verified actual ${forced ? 'forced' : 'structured'} path: idle marker=false, in-tool marker=true, child marker=false; 210 native tools parent-only.`);
+    console.log(`Verified actual ${forced ? 'forced' : 'structured'} path: idle marker=false, in-tool marker=true, child marker=false; 229 native tools parent-only.`);
   });
 }

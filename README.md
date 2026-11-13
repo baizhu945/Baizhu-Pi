@@ -6,13 +6,13 @@
 
 ## REA 模式（显式会话开关）
 
-当前 Pi 1.0.3 通过 `rea.nix` 声明式集成固定 REA 6.4.0
-（`morluto/rea` commit `2bf3663f654386c9fd8c1437c49659df97bd4697`）。
-REA 及引擎路径是扩展的私有依赖，不加入普通 Pi 的 PATH；不运行
-`rea setup`，不改全局 AGENTS、skills、mcp.json 或模型设置。
+`rea.nix` 通过固定 GitHub release revision 声明式集成最新发布版 REA 6.8.0
+（`morluto/rea` commit `160d821ac9a0310afcb8d1fc427862dd6508add5`）。REA 包使用固定
+Node 24.22.1 及 pinned source/npm hashes；REA 和引擎路径是扩展的私有依赖，
+不加入普通 Pi 的 PATH；不运行 `rea setup`，不改全局 AGENTS、skills、mcp.json 或模型设置。
 
 - `/rea on`：仅父交互式 TUI 可用，还需用户确认。确认后才启动原生 MCP，
-  暴露 187 个 `mcp__rea__*` 工具并注入本次会话的 Evidence/Unknown 指导。
+  暴露 229 个 `mcp__rea__*` 工具并注入本次会话的 Evidence/Unknown 指导。
 - `/rea off`：撤销授权与工具可达性；保留旧对话历史，不声称撤销已经发生的目标修改。
 - `/rea status`：只显示 UI 状态，不向模型追加消息。
 - 每个新建、恢复、fork、clone、reload 的会话都默认 off；没有持久化 on、

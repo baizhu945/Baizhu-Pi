@@ -37,7 +37,7 @@ const run = (args) => execute(cli, args, {
   maxBuffer: 8 * 1024 * 1024,
 });
 const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
-assert.equal(manifest.version, "6.7.0");
+assert.equal(manifest.version, "6.8.0");
 for (const file of [
   "dist/main.js", "dist/cli.js", "dist/mcp/main.js", "dist/cli-runtime/cli.js",
   "bridge/hopper_bridge.py", "bridge/ghidra/ReaGhidraBridge.java",
@@ -45,7 +45,7 @@ for (const file of [
   "bridge/pwntools/layout.py", "bridge/pwntools/decoder_runtime.py", "bridge/pwntools/recorded_crash.py",
   "bridge/pwndbg/launch.py", "bridge/pwndbg/core_context.py",
   "third_party/pwntools/README.md", "third_party/pwndbg/LICENSE.md", "third_party/evmole/LICENSE",
-  "scripts/rea.mjs", "scripts/electron-active-hook.cjs",
+  "scripts/rea.mjs", "scripts/lib/cli-process-environment.mjs", "scripts/electron-active-hook.cjs",
   "skills/reverse-engineer-anything/SKILL.md", "DISCLAIMER.md", "THIRD_PARTY_NOTICES.md",
   "bridge/ghidra/ReaGhidraBundleActivator.java", "bridge/ghidra/ReaGhidraPrepareRaw.java",
 ]) await access(join(root, file));
@@ -54,8 +54,10 @@ console.log("CLI version:", (await run(["--version"])).stdout.trim());
 assert.match((await run(["--help"])).stdout, /REA|rea/);
 const doctor = JSON.parse((await run(["mcp", "doctor", "--json"])).stdout);
 assert.equal(doctor.healthy, true, JSON.stringify(doctor));
-assert.equal(doctor.server.version, "6.7.0");
-assert.equal(doctor.inventory.tools.observed, doctor.inventory.tools.expected);
+assert.equal(doctor.server.version, "6.8.0");
+assert.equal(doctor.inventory.tools.expected, 229);
+assert.equal(doctor.inventory.tools.observed, 229);
+assert.equal(doctor.inventory.prompts.observed, 6);
 console.log("Production MCP doctor:", JSON.stringify(doctor));
 
 const { Client } = await load("@modelcontextprotocol/client");
@@ -74,7 +76,9 @@ try {
   assert.equal(stderr, "", `Unexpected MCP startup stderr: ${stderr}`);
   const rejected = await client.callTool({ name: "open_binary", arguments: { path: process.execPath, provider_id: "missing-provider" } });
   assert.equal(rejected.isError, true);
-  assert.equal(rejected.structuredContent?.error?.details?.selection_reason, "unknown_provider");
+  const rejectionText = rejected.content.find(block => block.type === "text")?.text;
+  assert(rejectionText, "Unknown-provider failure lost its structured text envelope");
+  assert.equal(JSON.parse(rejectionText).error?.details?.selection_reason, "unknown_provider");
   console.log(`--mcp initialize + exact tools/list (${tools.length}) + binary_session + unknown-provider rejection: PASS`);
 } finally {
   await client.close();

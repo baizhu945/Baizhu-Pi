@@ -1,68 +1,48 @@
-# Private Pi REA package
+# Pi REA private package
 
-Traditional Home Manager: `../rea.nix` contains REA, the existing patched Pi
-runtime and all mode/composition checks. No separate package Nix module, flake,
-global PATH installation, `rea setup` or automatic activation. DSH owns its
-independent recipe and helper files; neither configuration imports the other.
+Traditional Home Manager integration lives in `../rea.nix`. REA is a private child
+of the explicitly enabled Pi mode: no global `rea` PATH entry, `rea setup`, or
+changes to normal Pi tools, models, skills, AGENTS, or `mcp.json`. The DSH recipe
+is maintained separately; both recipes pin the same upstream release.
 
-## Current pin
+## Pin and runtime
 
-REA **6.7.0**, GitHub checkpoint `0c440bfc07f3cb343e2e836d27cccaed539cfe9c`.
-Source: `sha256-afd2BLZVThTeU+R8I+oeTh3q/6mO6sMkfJyuo5/inwM=`.
-Locked npm cache: `sha256-yWWKLAeHthuZcA6x84ME8SFjTVqAEtL+yX7G8QGj2II=`.
-Node24 private absolute executable; upstream lockfile unchanged.
+- Latest published GitHub release at this update: REA 6.8.0,
+  `morluto/rea` revision `160d821ac9a0310afcb8d1fc427862dd6508add5`.
+- Source hash: `sha256-2ADn3U3lvUoB4tCEpzO0rMfYE4sis+5uBiEazcp0gpI=`.
+- npm dependency hash: `sha256-3WPXD+qm5WVfrTEvepKwX5RZBfbLBcPB0uDmKIx4MR8=`.
+- Package build/runtime uses the pinned Node 24.22.1 from `agent/dsh/environment.nix`;
+  this supplies `DatabaseSync.limits` for SQLite and matches REA 6.8's engine range.
+- The complete 229-tool ordered catalog is checked against compiled contracts and
+  effects. The Pi MCP child sets `REA_MCP_INPUT_SCHEMA_PROFILE=full` so it advertises
+  the full nested schemas, not the compact default.
 
-## Patch review
+The Pi controller still requires a human `/rea on` confirmation in an interactive
+parent TUI. Each session starts off; REA tools and evidence guidance are removed on
+`/rea off`, and child/subagent sessions do not inherit authorization. Its native
+MCP source-hardening patch remains Pi-specific and separate from the REA package.
 
-Ghidra startup and all previously patched schema patterns are now fixed upstream.
-The old `schema-portability.patch` is retained as historical review material but
-**not applied**. Do not rebase its obsolete outbound-projection repair onto6.4.
-Portable NUL/ObjC patterns, normalized relative-root validation and reserved
-process-run key restrictions belong to upstream canonical validators now.
-Live official MCP JS/Rust/AJV and Unicode/newline boundary checks remain mandatory.
+## Schema portability
 
-Timeout parsing now accepts only canonical positive decimal milliseconds up to
-Node's2147483647ms timer bound; unset Ghidra default330000ms, invalid input fails
-closed. Authorized private configuration preserves1800000ms/1860s/8G.
-The user's Pi1.1.0 native MCP source-hardening patch stays separate and unchanged;
-it is not superseded by REA's own provider changes.
+REA 6.8 introduces a request-path lookahead unsupported by Rust's default regex
+engine. `schema-portability-6.8.patch` changes only that expression to an equivalent
+Rust-compatible form; `--fuzz=0` is enforced. The prior schema projection/ObjC
+compatibility patches are historical and are not applied. The install check compares
+the live full-profile MCP schemas with canonical Zod validation, JavaScript, Rust,
+and AJV, including Unicode/newline fixtures.
 
-## Build and assets
+## Package checks
 
-Locked offline npm cache and lifecycle scripts ignored. autoPatchelf selects GNU
-natives; only the unused optional musl LightningCSS libc is exempt during the
-prebuild pass. Build uses `compile` (tsc plus original-location-preserving runtime
-bundles) then `artifacts:skills`, not removed `build:unlocked` or Turbo workflows.
-Ship all original/bundled dist workers, bridge adapters, generated skills,
-third_party/licenses, disclaimers/notices and package imports/metadata/helper
-scripts. Keep test-only generatedMcpToolCatalog.js out of production.
+The Nix install check runs:
 
-REA6.4 owned subprocesses require a procps-compatible ps. The private executable
-prepends Nix procps for that child only. JavaScript/EVM/firmware/TShark/sigrok
-limiter settings use explicit Nix util-linux prlimit; no host /usr/bin assumption.
-No optional ADB/Frida driver/IDA/Hopper/Python/tshark/sigrok engine is installed
-or activated just because its operation appears in the187-tool catalog.
+- MCP doctor: healthy server identity, catalog digest, 229 tools and 6 prompts;
+- Ghidra startup-budget strict parsing and cancellation propagation;
+- schema portability over every input/output pattern;
+- SQLite MCP bounded readonly inspection, unchanged input hash, and no sidecars.
 
-## Verification
-
-Both independent packages check real stdio **210 tools /6 prompts**, canonical
-name/effects equality, strict startup parsing/client forwarding/cancellation,
-all full-profile input/output patterns with JS and Rust, and canonical/AJV
-Unicode/NUL/newline fixtures. SQLite smoke uses Node24.15+ DatabaseSync.limits,
-a selected-column readonly sample, unchanged input SHA and no source sidecars.
-Other public/API/native-pipeline tests are in `../tests/` and the deployment report.
-
-```sh
-pkg=$(nix-build --no-out-link -E '
-  let module = import /home/baizhu945/.config/home-manager/agent/pi/rea.nix {
-    pkgs = import <nixpkgs> {}; config = {};
-  }; in module.home.file.".pi/agent/extensions/rea-mode".source.rea')
-scratch=$(mktemp -d /tmp/rea-runtime-verification.XXXXXX)
-node rea-package/verify-runtime.mjs "$pkg" "$scratch"
-```
-
-MCP6.4 analysis delivers Evidence directly (`normalized_result`, `provider`,
-identity/provenance), while session status remains in `result` and groups tool
-availability. Summary is opt-in; retained-Evidence paging is tested, not a reason
-to fabricate old Evidence metadata. Catalog coverage is not all187 operations or
-all-platform execution coverage. Models/defaults/skills/permissions remain intact.
+`verify-runtime.mjs` additionally checks the installed file manifest, CLI/MCP
+startup, real `tools/list`, and native PTY child spawn with an isolated HOME/PATH.
+These checks do not claim that every catalog operation, optional engine, platform,
+or real target has been exercised. `rea-installed-active.mjs` and the real Ghidra/
+JavaScript/EVM tests are separate deployment gates; no live provider or user
+credentials are used by the package checks.
