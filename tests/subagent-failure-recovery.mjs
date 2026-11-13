@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const [sdkDir, configuredPackage] = process.argv.slice(2);
@@ -48,7 +49,7 @@ function respond(stream, model, content, error) {
 }
 
 let sequence = 0;
-async function setup(t, produce, retry = { enabled: true, maxRetries: 2, baseDelayMs: 1 }) {
+async function setup(t, produce, retry = { enabled: true, maxRetries: 2, baseDelayMs: 1 }, { persist = false } = {}) {
   const scratch = fs.mkdtempSync(path.join(tmpdir(), 'pi-subagent-recovery-'));
   const agentDir = path.join(scratch, 'agent');
   fs.mkdirSync(path.join(agentDir, 'agents'), { recursive: true });
@@ -56,9 +57,9 @@ async function setup(t, produce, retry = { enabled: true, maxRetries: 2, baseDel
   process.env.PI_CODING_AGENT_DIR = agentDir; process.env.PI_OFFLINE = '1'; process.chdir(scratch);
   fs.writeFileSync(path.join(agentDir, 'settings.json'), JSON.stringify({ compaction: { enabled: false }, retry }));
   fs.writeFileSync(path.join(agentDir, 'subagents.json'), JSON.stringify({ schedulingEnabled: false, rememberAgents: false, outputTranscript: false }));
-  fs.writeFileSync(path.join(agentDir, 'agents/recovery-fixture.md'), '---\nname: recovery-fixture\ndescription: Recovery fixture\ntools: read, write, edit\nextensions: false\nskills: false\ninherit_context: false\npersist_session: false\noutput_transcript: false\n---\nComplete the requested fixture.\n');
+  fs.writeFileSync(path.join(agentDir, 'agents/recovery-fixture.md'), `---\nname: recovery-fixture\ndescription: Recovery fixture\ntools: read, write, edit\nextensions: false\nskills: false\ninherit_context: false\npersist_session: ${persist}\noutput_transcript: false\n---\nComplete the requested fixture.\n`);
   const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
-  const calls = [], events = [], failures = [];
+  const calls = [], models = [], events = [], failures = [];
   let api, ctx;
   const providerName = `recovery-fixture-${++sequence}`;
   const loader = new sdk.DefaultResourceLoader({ cwd: scratch, agentDir, settingsManager,
@@ -70,28 +71,30 @@ async function setup(t, produce, retry = { enabled: true, maxRetries: 2, baseDel
         streamSimple(model, context) {
           const stream = new AssistantMessageEventStream();
           calls.push(context);
+          models.push(model.id);
           queueMicrotask(async () => {
             try { const result = await produce(calls.length, context, scratch); respond(stream, model, result.content ?? [], result.error); }
             catch (error) { respond(stream, model, [], String(error)); }
           });
           return stream;
         },
-        models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], contextWindow: 100000, maxTokens: 1024,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+        models: ['fixture', 'alternate'].map(id => ({ id, name: id, reasoning: false, input: ['text'],
+          contextWindow: 100000, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } })),
       });
     }],
   });
   await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []);
-  const { session } = await sdk.createAgentSession({ cwd: scratch, agentDir, settingsManager, resourceLoader: loader, sessionManager: sdk.SessionManager.inMemory(scratch) });
+  const sessionManager = persist ? sdk.SessionManager.create(scratch, path.join(scratch, 'parent-sessions')) : sdk.SessionManager.inMemory(scratch);
+  const { session } = await sdk.createAgentSession({ cwd: scratch, agentDir, settingsManager, resourceLoader: loader, sessionManager });
   await session.bindExtensions({ mode: 'sdk', onError: error => failures.push(error) });
   await session.setModel(session._modelRuntime.getModel(providerName, 'fixture'));
   session.agent.streamFunction = model => { const stream = new AssistantMessageEventStream(); queueMicrotask(() => respond(stream, model, [{ type: 'text', text: 'parent acknowledged' }])); return stream; };
-  const execute = (name, params) => loader.getExtensions().extensions.flatMap(e => [...e.tools.values()]).find(t => t.definition.name === name).definition.execute('fixture', params, undefined, undefined, ctx);
-  const notifications = () => session.messages.filter(m => m.role === 'custom' && m.customType === 'subagent-notification');
+  const execute = (name, params, toolCallId = 'fixture') => loader.getExtensions().extensions.flatMap(e => [...e.tools.values()]).find(t => t.definition.name === name).definition.execute(toolCallId, params, undefined, undefined, ctx);
+  const notifications = (parent = session) => parent.messages.filter(m => m.role === 'custom' && m.customType === 'subagent-notification');
   const manager = () => globalThis[Symbol.for('pi-subagents:manager')];
   let cleanupSession = session;
-  const spawn = async () => {
-    const response = await execute('Agent', { subagent_type: 'recovery-fixture', description: 'Fixture work', prompt: 'Complete the fixture and return the result.' });
+  const spawn = async (options = {}) => {
+    const response = await execute('Agent', { subagent_type: 'recovery-fixture', description: 'Fixture work', prompt: 'Complete the fixture and return the result.', ...options });
     const id = response.details.agentId; assert(id, text(response.content)); return id;
   };
   const settled = async id => { await until(() => ['completed', 'error', 'stopped'].includes(manager().getRecord(id)?.status)); await until(() => notifications().some(m => text(m.content).includes(id))); return manager().getRecord(id); };
@@ -101,8 +104,19 @@ async function setup(t, produce, retry = { enabled: true, maxRetries: 2, baseDel
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     if (previousOffline === undefined) delete process.env.PI_OFFLINE; else process.env.PI_OFFLINE = previousOffline;
   });
-  return { session, api, ctx: () => ctx, calls, events, notifications, execute, manager, spawn, settled, scratch,
-    agentDir, settingsManager, loader, setCleanupSession: value => { cleanupSession = value; } };
+  const reopenParent = async file => {
+    await cleanupSession.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+    cleanupSession.dispose();
+    await loader.reload();
+    const opened = await sdk.createAgentSession({ cwd: scratch, agentDir, settingsManager, resourceLoader: loader,
+      sessionManager: sdk.SessionManager.open(file), modelRuntime: session.modelRuntime, model: session.model });
+    cleanupSession = opened.session;
+    await opened.session.bindExtensions({ mode: 'sdk', onError: error => failures.push(error) });
+    opened.session.agent.streamFunction = session.agent.streamFunction;
+    return opened.session;
+  };
+  return { session, api, ctx: () => ctx, calls, models, events, notifications, execute, manager, spawn, settled, scratch,
+    agentDir, settingsManager, loader, reopenParent, setCleanupSession: value => { cleanupSession = value; } };
 }
 
 test('already-cancelled spawn never initializes or contacts a provider', { timeout: 15000 }, async t => {
@@ -283,6 +297,144 @@ test('resuming a failed child gets recovery guidance and returns only the new re
   assert(hasRecovery(h.calls[2])); assert.equal(h.manager().getRecord(id).result, 'RESUME_RESULT');
   assert.match(text(h.notifications()[1].content), /<task_result>[\s\S]*RESUME_RESULT/);
 });
+
+async function withCleanupTimer(t, setupFixture) {
+  let cleanup;
+  const setInterval = globalThis.setInterval;
+  const interval = t.mock.method(globalThis, 'setInterval', (callback, ms, ...args) => {
+    if (ms === 60_000) cleanup ??= callback;
+    return setInterval(callback, ms, ...args);
+  });
+  try {
+    const h = await setupFixture();
+    assert(cleanup);
+    return { ...h, evict(id) {
+      h.manager().getRecord(id).completedAt = Date.now() - 11 * 60_000;
+      cleanup();
+      assert.equal(h.manager().getRecord(id), undefined);
+    } };
+  } finally {
+    interval.mock.restore();
+  }
+}
+
+test('Agent.resume continues the same saved child after the cleanup timer evicts it', { timeout: 15000 }, async t => {
+  const h = await withCleanupTimer(t, () =>
+    setup(t, n => ({ content: [{ type: 'text', text: `RESULT_${n}` }] }), undefined, { persist: true }));
+  const id = await h.spawn({ name: 'fixture-audit', model: 'alternate', isolated: true });
+  const original = await h.settled(id);
+  const file = original.sessionFile;
+  assert(fs.existsSync(file));
+  for (let n = 2; n <= 3; n++) {
+    h.evict(id);
+    const response = await h.execute('Agent', {
+      subagent_type: 'unknown-fixture', resume: id, description: 'Continue fixture',
+      ...(n === 3 && { model: 'invalid-override' }), prompt: `Continue with step ${n}.`,
+    }, `resume-${n}`);
+    assert.equal(response.details?.agentId, id, text(response.content));
+    await until(() => h.notifications().length === n);
+    const resumed = h.manager().getRecord(id);
+    assert.equal(resumed.sessionFile, file);
+    assert.equal(resumed.type, 'recovery-fixture');
+    assert.equal(resumed.alias, 'fixture-audit');
+    assert.equal(resumed.isolated, true);
+    assert.equal(h.models[n - 1], 'alternate');
+    assert.equal(resumed.result, `RESULT_${n}`);
+    assert.equal(resumed.toolCallId, `resume-${n}`);
+    assert.equal(h.notifications().at(-1).details.id, id);
+    assert(h.calls[n - 1].messages.some(m => text(m.content) === `RESULT_${n - 1}`));
+  }
+});
+
+test('a saved worktree child resumes from its previous branch in a new checkout', { timeout: 15000 }, async t => {
+  const h = await withCleanupTimer(t, () => setup(t, (n, context) => {
+    if (n === 1) return { content: [{ type: 'toolCall', id: 'worktree-write', name: 'write',
+      arguments: { path: 'worktree-result.txt', content: 'saved worktree result' } }] };
+    if (n === 3) return { content: [{ type: 'toolCall', id: 'worktree-read', name: 'read',
+      arguments: { path: 'worktree-result.txt' } }] };
+    return { content: [{ type: 'text', text: n === 2 ? 'WORKTREE_FIRST_RESULT'
+      : text(context.messages.findLast(message => message.role === 'toolResult').content) }] };
+  }, undefined, { persist: true }));
+  const git = (...args) => execFileSync('git', args, { cwd: h.scratch, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  git('init', '-q');
+  git('config', 'user.name', 'Test');
+  git('config', 'user.email', 'test@example.invalid');
+  git('commit', '-qm', 'Base', '--allow-empty');
+  const id = await h.spawn({ isolation: 'worktree' });
+  const first = await h.settled(id);
+  assert(first.worktreeResult.branch);
+  assert(!fs.existsSync(first.worktree.path));
+  h.evict(id);
+  const result = await h.execute('Agent', { resume: id, subagent_type: 'recovery-fixture',
+    description: 'Resume worktree', prompt: 'Read the saved file.' });
+  assert.equal(result.details?.agentId, id, text(result.content));
+  await until(() => h.notifications().length === 2);
+  const resumed = h.manager().getRecord(id);
+  assert.match(resumed.result, /saved worktree result/);
+  assert.equal(resumed.sessionFile, first.sessionFile);
+  assert.notEqual(resumed.worktree.path, first.worktree.path);
+  assert(!fs.existsSync(path.join(h.scratch, 'worktree-result.txt')));
+  assert(!fs.existsSync(resumed.worktree.path));
+});
+
+for (const legacy of [false, true]) {
+  test(`Agent.resume reopens a ${legacy ? 'legacy' : 'current'} child in the original parent session`, { timeout: 15000 }, async t => {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    t.after(release);
+    const h = await setup(t, async n => {
+      if (n > 1) await gate;
+      return { content: [{ type: 'text', text: `PARENT_REOPEN_${n}` }] };
+    }, undefined, { persist: true });
+    const id = await h.spawn({ model: 'alternate' });
+    const original = await h.settled(id);
+    const childFile = original.sessionFile;
+    const parentFile = h.session.sessionManager.getSessionFile();
+    const parentId = h.session.sessionManager.getSessionId();
+    if (legacy) {
+      const legacyLog = fs.readFileSync(parentFile, 'utf8').trimEnd().split('\n').map(line => {
+        const entry = JSON.parse(line);
+        if (entry.customType === 'subagents:record') {
+          delete entry.data.resume;
+          delete entry.data.handle;
+          delete entry.data.alias;
+        }
+        return JSON.stringify(entry);
+      });
+      fs.writeFileSync(parentFile, legacyLog.join('\n') + '\n');
+    }
+    const other = sdk.SessionManager.create(h.scratch, path.dirname(parentFile));
+    other.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'Unrelated parent' }],
+      api: 'fixture', provider: 'fixture', model: 'fixture', stopReason: 'stop', timestamp: Date.now(),
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } } });
+    // A copied/forked parent log may carry the original completion record.
+    const completion = h.session.sessionManager.getBranch().find(e => e.customType === 'subagents:record');
+    other.appendCustomEntry('subagents:record', legacy ? { ...completion.data, resume: undefined } : completion.data);
+    const params = { resume: id, subagent_type: 'recovery-fixture', description: 'Resume fixture', prompt: 'Continue after restart.' };
+    await h.reopenParent(other.getSessionFile());
+    const denied = await h.execute('Agent', params);
+    if (denied.details?.agentId) {
+      await h.manager().waitForAll();
+      assert.match(h.manager().getRecord(id).error, /does not belong/);
+    } else {
+      assert.match(text(denied.content), /no saved child session/);
+    }
+    assert.equal(h.calls.length, 1);
+
+    const parent = await h.reopenParent(parentFile);
+    assert.equal(parent.sessionManager.getSessionId(), parentId);
+    assert.equal(h.manager().getRecord(id), undefined);
+    const attempts = await Promise.all([h.execute('Agent', params), h.execute('Agent', params)]);
+    assert.equal(attempts.filter(result => result.details?.agentId === id).length, 1);
+    assert(attempts.some(result => /still (queued|running)/.test(text(result.content))));
+    await until(() => h.calls.length === 2);
+    release();
+    await until(() => h.notifications(parent).some(m => text(m.content).includes('PARENT_REOPEN_2')));
+    assert.equal(h.manager().getRecord(id).sessionFile, childFile);
+    assert.equal(h.models[1], 'alternate');
+    assert(h.calls[1].messages.some(m => text(m.content) === 'PARENT_REOPEN_1'));
+  });
+}
 
 test('stopping during retry backoff cancels recovery without another model call', { timeout: 15000 }, async t => {
   const h = await setup(t, () => ({ error: 'Upstream idle timeout exceeded' }), { enabled: true, maxRetries: 2, baseDelayMs: 5000 });

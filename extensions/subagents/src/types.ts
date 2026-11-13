@@ -128,20 +128,26 @@ export type ViewerMarkdownMode = 'off' | 'assistant' | 'all';
  */
 export type AgentMentionMode = 'model' | 'direct' | 'off';
 
-/**
- * What survives a record's eviction so `@handle` keeps working. The live record
- * is discarded after ~10 minutes, but the pi session it wrote is still on disk,
- * and this is the little that is needed to find and describe it again.
- */
-export interface AgentTombstone {
-  handle: string;
+export interface SavedAgentSession {
+  sessionFile: string;
+  sessionId: string;
+  cwd: string;
+  configCwd?: string;
+  isolated?: boolean;
+  worktreeBase?: string;
+  worktreeRef?: string;
+}
+
+/** The identity and session needed to resume after the live record is evicted. */
+export interface AgentTombstone extends SavedAgentSession {
+  handle?: string;
   alias?: string;
   id: string;
   type: SubagentType;
   description: string;
-  /** Always set — a record with no session file is never tombstoned. */
-  sessionFile: string;
   completedAt: number;
+  /** Wait for the previous session's shutdown handlers before reopening its file. */
+  shutdown?: Promise<void>;
 }
 
 /**
@@ -220,6 +226,10 @@ export interface AgentRecord {
    * in-memory session, which leaves nothing to reopen.
    */
   sessionFile?: string;
+  savedSession?: SavedAgentSession;
+  isolated?: boolean;
+  configCwd?: string;
+  worktreeBase?: string;
   /** Cleanup function for the output file stream subscription. */
   outputCleanup?: () => void;
   /**

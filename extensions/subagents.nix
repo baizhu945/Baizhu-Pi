@@ -24,9 +24,10 @@ let
 
   piSubagentsFork = pkgs.stdenvNoCC.mkDerivation {
     pname = "pi-subagents-local-fork";
-    version = "0.19.0-local.3";
+    version = "0.19.0-local.4";
     src = ./subagents;
     nativeBuildInputs = [ pkgs.gnutar pkgs.nodejs ];
+    nativeInstallCheckInputs = [ pkgs.git ];
     dontConfigure = true;
     dontBuild = true;
     installPhase = ''

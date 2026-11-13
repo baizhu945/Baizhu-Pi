@@ -99,9 +99,9 @@ export function mentionRoster(
   // started".
   for (const entry of manager.listTombstones()) {
     const handle = entry.alias ?? entry.handle;
-    if (taken.has(handle.toLowerCase())) continue;
+    if (!handle || taken.has(handle.toLowerCase())) continue;
     taken.add(handle.toLowerCase());
-    taken.add(entry.handle.toLowerCase());
+    if (entry.handle) taken.add(entry.handle.toLowerCase());
     targets.push({ kind: "tombstone", handle, entry, typeLabel: displayNameOf(entry.type) });
   }
 

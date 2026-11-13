@@ -26,9 +26,10 @@ import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
+import { openSavedAgentSession, resolveConfiguredSessionDir } from "./saved-agent.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
-import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentConfig, SavedAgentSession, SubagentType, ThinkingLevel } from "./types.js";
 import type { LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 
@@ -359,15 +360,8 @@ export interface RunOptions {
   isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
-  /**
-   * Reopen this pi session file rather than starting an empty conversation.
-   * `createAgentSession` seeds itself from whatever its SessionManager holds,
-   * so pointing it at an existing file rehydrates that agent's history and the
-   * prompt continues it. Everything else — tools, model, system prompt, turn
-   * caps — is still resolved from the agent type, so the continuation runs
-   * under the type's *current* definition, not the one the original run used.
-   */
-  resumeSessionFile?: string;
+  resumeFrom?: SavedAgentSession;
+  beforeResume?: Promise<void>;
   /**
    * True when another agent spawned this one. Only top-level agents get a
    * handle, so only they can be reopened by name — which is the whole reason
@@ -577,19 +571,13 @@ function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => 
   return () => signal.removeEventListener("abort", onAbort);
 }
 
-function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string): string | undefined {
-  if (!sessionDir) return undefined;
-  if (sessionDir === "~" || sessionDir.startsWith("~/")) return resolve(homedir(), sessionDir.slice(2));
-  if (isAbsolute(sessionDir)) return sessionDir;
-  return resolve(cwd, sessionDir);
-}
-
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
   prompt: string,
   options: RunOptions,
 ): Promise<RunResult> {
+  if (options.beforeResume) await options.beforeResume;
   options.signal?.throwIfAborted();
   const agentConfig = options.agentConfig ?? getAgentConfig(type);
   const config = options.agentConfig ?? getConfig(type);
@@ -815,12 +803,12 @@ export async function runAgent(
   }
 
   // Resolve model: explicit option > config.model > parent model
-  const model = options.model ?? resolveDefaultModel(
+  const model = options.resumeFrom ? undefined : options.model ?? resolveDefaultModel(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
   );
 
   // Resolve thinking level: explicit option > agent config > undefined (inherit)
-  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
+  const thinkingLevel = options.resumeFrom ? undefined : options.thinkingLevel ?? agentConfig?.thinking;
 
   const disallowedSet = agentConfig?.disallowedTools
     ? new Set(agentConfig.disallowedTools)
@@ -949,11 +937,10 @@ export async function runAgent(
   // which `rememberAgents` supplies for top-level agents only. Same precedence
   // as `outputTranscript`.
   const persistSession = agentConfig?.persistSession ?? (options.nested ? false : rememberAgents);
-  const sessionManager = options.resumeSessionFile
-    // Reopening an existing conversation: the file already carries its own
-    // header (cwd, parent) and history, so none of the create-time options
-    // apply. `sessionDir` still matters for a later /new or /branch off it.
-    ? SessionManager.open(options.resumeSessionFile, configuredSessionDir ?? defaultSessionDir)
+  options.signal?.throwIfAborted();
+  const saved = options.resumeFrom;
+  const sessionManager = saved
+    ? openSavedAgentSession(ctx, saved, effectiveCwd)
     : persistSession
       ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
           // Optional metadata — it only nests the subagent under its spawner in
